@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/gordian-engine/dragon"
+	"github.com/gordian-engine/dragon/breathcast"
 	"github.com/gordian-engine/dragon/dcert"
 	"github.com/gordian-engine/dragon/dcert/dcerttest"
 	"github.com/gordian-engine/dragon/dconn"
+	"github.com/gordian-engine/dragon/dpubsub"
 	"github.com/gordian-engine/dragon/dview/dviewrand"
 	"github.com/gordian-engine/gdragon/gdtmp2p"
 	"github.com/gordian-engine/gordian/tm/tmp2p"
@@ -35,17 +37,26 @@ type Network struct {
 
 	log *slog.Logger
 
+	originationConfigFunc gdtmp2p.OriginationConfigFunc
+
 	udpConns []*net.UDPConn
 	nodes    []*dragon.Node
 	caCerts  []*x509.Certificate
 	chains   []dcert.Chain
 }
 
-func NewNetwork(t *testing.T, ctx context.Context) (tmp2ptest.Network, error) {
+// NetworkConfig is the configuration for [NewNetwork].
+type NetworkConfig struct {
+	OriginationConfigFunc gdtmp2p.OriginationConfigFunc
+}
+
+func NewNetwork(t *testing.T, ctx context.Context, cfg NetworkConfig) (tmp2ptest.Network, error) {
 	n := &Network{
 		t: t,
 
 		log: slogt.New(t, slogt.Text()),
+
+		originationConfigFunc: cfg.OriginationConfigFunc,
 	}
 	return n, nil
 }
@@ -54,6 +65,14 @@ const (
 	// Arbitrary sizes that seem reasonable for most tests.
 	activeViewSize  = 5
 	passiveViewSize = 8
+
+	// Arbitrary protocol IDs for test.
+	BreathcastProtocolID = 0x90
+
+	// TODO: this should be a non-constant,
+	// derived from the hash scheme somehow.
+	// For now it is uint64 height + uint32 round + 32-byte blake2b hash.
+	broadcastIDLength = 8 + 4 + 32
 )
 
 func (n *Network) Connect(ctx context.Context) (tmp2p.Connection, error) {
@@ -101,7 +120,7 @@ func (n *Network) Connect(ctx context.Context) (tmp2p.Connection, error) {
 		ClientAuth: tls.RequireAndVerifyClientCert,
 	}
 
-	connChanges := make(chan dconn.Change, 8)
+	connChangesCh := make(chan dconn.Change, 8)
 	nodeLog := n.log.With("global_node_idx", leafIdx)
 	nc := dragon.NodeConfig{
 		UDPConn: uc,
@@ -127,10 +146,13 @@ func (n *Network) Connect(ctx context.Context) (tmp2p.Connection, error) {
 		// at least not at this point in time.
 		ShuffleSignal: make(chan struct{}),
 
-		ConnectionChanges: connChanges,
+		ConnectionChanges: connChangesCh,
 	}
 
 	nodeCtx, nodeCancel := context.WithCancel(ctx)
+
+	connChangeStream, streamDone := dpubsub.RunChannelToStream(nodeCtx, connChangesCh)
+	n.t.Cleanup(func() { <-streamDone })
 
 	node, err := dragon.NewNode(nodeCtx, nodeLog, nc)
 	if err != nil {
@@ -152,7 +174,31 @@ func (n *Network) Connect(ctx context.Context) (tmp2p.Connection, error) {
 
 	n.nodes = append(n.nodes, node)
 
-	return gdtmp2p.NewConnection(ctx, node, nodeCancel, connChanges), nil
+	bcProto := breathcast.NewProtocol(
+		nodeCtx,
+		nodeLog.With("protocol", "breathcast"),
+		breathcast.ProtocolConfig{
+			ConnectionChanges: connChangeStream,
+
+			ProtocolID: BreathcastProtocolID,
+
+			BroadcastIDLength: broadcastIDLength,
+		},
+	)
+
+	cfg := gdtmp2p.ConnectionConfig{
+		Node:   node,
+		Cancel: nodeCancel,
+
+		Breathcast: bcProto,
+
+		OriginationConfigFunc: n.originationConfigFunc,
+
+		ConnChanges: connChangeStream,
+	}
+	return gdtmp2p.NewConnection(
+		ctx, nodeLog.With("subsys", "conn"), cfg,
+	), nil
 }
 
 func (n *Network) Wait() {

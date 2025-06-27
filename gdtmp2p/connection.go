@@ -2,22 +2,31 @@ package gdtmp2p
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/gordian-engine/dragon"
+	"github.com/gordian-engine/dragon/breathcast"
 	"github.com/gordian-engine/dragon/dconn"
+	"github.com/gordian-engine/dragon/dpubsub"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmp2p"
 )
 
 type Connection struct {
+	log *slog.Logger
+
 	n *dragon.Node
 
 	h tmconsensus.ConsensusHandler
 
+	bc *breathcast.Protocol
+
+	getOriginationConfig OriginationConfigFunc
+
 	cancel context.CancelFunc
 
-	connChanges <-chan dconn.Change
+	connChanges *dpubsub.Stream[dconn.Change]
 
 	setConsensusHandlerRequests chan setConsensusHandlerRequest
 
@@ -35,18 +44,43 @@ type setConsensusHandlerRequest struct {
 	Resp    chan struct{}
 }
 
+// OriginationConfigFunc is used in the [Connection]'s main loop.
+// The consensus engine only provides a proposed header;
+// the driver is responsible for definining how to create
+// a breathcast origination from only the information in the proposed header.
+type OriginationConfigFunc func(
+	context.Context, tmconsensus.ProposedHeader,
+) (breathcast.OriginationConfig, error)
+
+// ConnectionConfig is the configuration for [NewConnection].
+type ConnectionConfig struct {
+	Node   *dragon.Node
+	Cancel context.CancelFunc
+
+	Breathcast *breathcast.Protocol
+
+	OriginationConfigFunc OriginationConfigFunc
+
+	ConnChanges *dpubsub.Stream[dconn.Change]
+}
+
 func NewConnection(
 	ctx context.Context,
-	n *dragon.Node,
-	cancel context.CancelFunc,
-	connChanges <-chan dconn.Change,
+	log *slog.Logger,
+	cfg ConnectionConfig,
 ) *Connection {
 	c := &Connection{
-		n: n,
+		log: log,
 
-		cancel: cancel,
+		n: cfg.Node,
 
-		connChanges: connChanges,
+		bc: cfg.Breathcast,
+
+		getOriginationConfig: cfg.OriginationConfigFunc,
+
+		cancel: cfg.Cancel,
+
+		connChanges: cfg.ConnChanges,
 
 		// Unbuffered since caller blocks.
 		setConsensusHandlerRequests: make(chan setConsensusHandlerRequest),
@@ -74,6 +108,27 @@ func (c *Connection) mainLoop(ctx context.Context) {
 		case req := <-c.setConsensusHandlerRequests:
 			c.h = req.Handler
 			close(req.Resp)
+		case ph := <-c.outgoingProposedHeaders:
+			oc, err := c.getOriginationConfig(ctx, ph)
+			if err != nil {
+				c.log.Error(
+					"Failed to get origination config",
+					"height", ph.Header.Height,
+					"round", ph.Round,
+					"err", err,
+				)
+				continue
+			}
+
+			bop, err := c.bc.NewOrigination(ctx, oc)
+			if err != nil {
+				c.log.Error("Failed to create origination", "err", err)
+				continue
+			}
+
+			// TODO: how will we track the broadcast operation?
+			// And how does Gordian decide when to end the operation?
+			_ = bop
 		}
 	}
 }
