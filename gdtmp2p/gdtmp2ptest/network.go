@@ -2,10 +2,14 @@ package gdtmp2ptest
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -15,12 +19,15 @@ import (
 
 	"github.com/gordian-engine/dragon"
 	"github.com/gordian-engine/dragon/breathcast"
+	"github.com/gordian-engine/dragon/breathcast/bcmerkle/bcsha256"
 	"github.com/gordian-engine/dragon/dcert"
 	"github.com/gordian-engine/dragon/dcert/dcerttest"
 	"github.com/gordian-engine/dragon/dconn"
 	"github.com/gordian-engine/dragon/dpubsub"
 	"github.com/gordian-engine/dragon/dview/dviewrand"
 	"github.com/gordian-engine/gdragon/gdtmp2p"
+	"github.com/gordian-engine/gordian/tm/tmcodec"
+	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmp2p"
 	"github.com/gordian-engine/gordian/tm/tmp2p/tmp2ptest"
 	"github.com/neilotoole/slogt"
@@ -37,6 +44,7 @@ type Network struct {
 
 	log *slog.Logger
 
+	unmarshaler           tmcodec.Unmarshaler
 	originationConfigFunc gdtmp2p.OriginationConfigFunc
 
 	udpConns []*net.UDPConn
@@ -48,6 +56,8 @@ type Network struct {
 // NetworkConfig is the configuration for [NewNetwork].
 type NetworkConfig struct {
 	OriginationConfigFunc gdtmp2p.OriginationConfigFunc
+
+	Unmarshaler tmcodec.Unmarshaler
 }
 
 func NewNetwork(t *testing.T, ctx context.Context, cfg NetworkConfig) (tmp2ptest.Network, error) {
@@ -56,6 +66,7 @@ func NewNetwork(t *testing.T, ctx context.Context, cfg NetworkConfig) (tmp2ptest
 
 		log: slogt.New(t, slogt.Text()),
 
+		unmarshaler:           cfg.Unmarshaler,
 		originationConfigFunc: cfg.OriginationConfigFunc,
 	}
 	return n, nil
@@ -192,6 +203,10 @@ func (n *Network) Connect(ctx context.Context) (tmp2p.Connection, error) {
 
 		Breathcast: bcProto,
 
+		BreathcastProtocolID: BreathcastProtocolID,
+
+		Unmarshaler: n.unmarshaler,
+
 		OriginationConfigFunc: n.originationConfigFunc,
 
 		ConnChanges: connChangeStream,
@@ -205,6 +220,94 @@ func (n *Network) Wait() {
 	for _, node := range n.nodes {
 		node.Wait()
 	}
+}
+
+func (n *Network) AddDriverAnnotations(
+	ctx context.Context,
+	c tmp2p.Connection,
+	ph *tmconsensus.ProposedHeader,
+) error {
+	// This is a kind of weird setup.
+	// The compliance test has to make the proposed header from a fixture,
+	// and then that proposed header is sent directly to the Network instance.
+	// Normally, the engine would set annotations on the proposed header,
+	// but the network compliance tests circumvent the engine.
+	// Therefore we have to add the annotations out of band.
+	//
+	// These annotations are critical to network communication
+	// but are otherwise irrelevant to blockchain data,
+	// so they are annotations on the ProposedHeader, not the Header.
+
+	// First, recreate the deterministic data.
+	po, _, err := PrepareOrigination(*ph)
+	if err != nil {
+		return fmt.Errorf("failed to prepare origination: %w", err)
+	}
+
+	a := gdtmp2p.BroadcastAnnotation{
+		NData:   uint16(po.NumData),
+		NParity: uint16(po.NumParity),
+
+		TotalDataSize: 16 * 1024, // TODO: don't hardcode this value.
+
+		HashNonce: nil, // TODO?
+
+		RootProofs: po.RootProof,
+
+		// TODO: does this need to account for broadcast ID length?
+		ChunkSize: uint16(len(po.Packets[0])),
+	}
+
+	j, err := json.Marshal(a)
+	if err != nil {
+		return fmt.Errorf("failed to marshal annotation: %w", err)
+	}
+
+	ph.Annotations.Driver = j
+	return nil
+}
+
+func PrepareOrigination(ph tmconsensus.ProposedHeader) (
+	breathcast.PreparedOrigination, []byte, error,
+) {
+	seed := sha256.Sum256(ph.Header.DataID)
+	cc := rand.NewChaCha8(seed)
+	blockData := make([]byte, 16*1024)
+	_, err := io.ReadFull(cc, blockData)
+	if err != nil {
+		return breathcast.PreparedOrigination{}, nil, fmt.Errorf(
+			"failed to generate random block data: %w", err,
+		)
+	}
+
+	bid := make([]byte, 8+4+len(ph.Header.Hash))
+	binary.BigEndian.PutUint64(bid, ph.Header.Height)
+	binary.BigEndian.PutUint32(bid[8:], ph.Round)
+	_ = copy(bid[8+4:], ph.Header.Hash)
+
+	po, err := breathcast.PrepareOrigination(blockData, breathcast.PrepareOriginationConfig{
+		// Doesn't matter much for test.
+		MaxChunkSize: 1200,
+
+		ProtocolID: BreathcastProtocolID,
+
+		BroadcastID: bid,
+
+		ParityRatio: 0.1,
+
+		HeaderProofTier: 2,
+
+		Hasher: bcsha256.Hasher{},
+
+		HashSize: bcsha256.HashSize,
+	})
+	if err != nil {
+		return breathcast.PreparedOrigination{}, nil, fmt.Errorf(
+			"failed to prepare origination: %w", err,
+		)
+	}
+
+	return po, bid, nil
 }
 
 func (n *Network) Stabilize(ctx context.Context) error {
