@@ -335,14 +335,15 @@ func (c *Connection) SetConsensusHandler(ctx context.Context, h tmconsensus.Cons
 }
 
 func (c *Connection) handleDisconnect(ctx context.Context) {
+	// Wait for either context cancellation or a call to Disconnect.
 	select {
 	case <-ctx.Done():
-		return
 	case <-c.disconnectCh:
-		c.cancel()
-		c.n.Wait()
-		close(c.disconnected)
 	}
+
+	c.cancel()
+	c.n.Wait()
+	close(c.disconnected)
 }
 
 func (c *Connection) Disconnect() {
