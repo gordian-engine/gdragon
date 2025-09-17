@@ -1,0 +1,145 @@
+package gdwsu_test
+
+import (
+	"context"
+	"encoding/binary"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/gordian-engine/dragon/dconn"
+	"github.com/gordian-engine/dragon/wingspan"
+	"github.com/gordian-engine/dragon/wingspan/wingspantest"
+	"github.com/gordian-engine/gdragon/gdwsu"
+	"github.com/gordian-engine/gordian/gcrypto"
+	"github.com/gordian-engine/gordian/gcrypto/gcryptotest"
+	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
+	"github.com/stretchr/testify/require"
+)
+
+func TestSession(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const protocolID byte = 0x99 // Arbitrary for test.
+
+	pfx := wingspantest.NewProtocolFixture[
+		gdwsu.ParsedPacket, gdwsu.OutboundPacket,
+		gdwsu.ReceivedFromPeer, gdwsu.UpdateFromCentral,
+	](t, ctx, wingspantest.ProtocolFixtureConfig{
+		Nodes:           2,
+		ProtocolID:      protocolID,
+		SessionIDLength: 8 + 4,
+	})
+
+	const height = 100
+	const round = 2
+
+	sid := make([]byte, 8+4)
+	binary.BigEndian.PutUint64(sid, height)
+	binary.BigEndian.PutUint32(sid[8:], round)
+
+	signers := gcryptotest.DeterministicEd25519Signers(2)
+	pubKeys := make([]gcrypto.PubKey, len(signers))
+	for i, s := range signers {
+		pubKeys[i] = s.PubKey()
+	}
+
+	const edSigLen = 64
+	const blakeHashLen = 32
+
+	// Set up the state and session for each node.
+	cs0, d0 := gdwsu.NewCentralState(
+		ctx,
+		height, round,
+		pubKeys,
+		edSigLen, blakeHashLen,
+		tmconsensustest.SimpleSignatureScheme{},
+	)
+	sess0, err := pfx.Protocols[0].NewSession(
+		ctx,
+		sid,
+		[]byte("ah0"),
+		cs0, d0,
+	)
+	require.NoError(t, err)
+	defer sess0.Cancel()
+
+	cs1, d1 := gdwsu.NewCentralState(
+		ctx,
+		height, round,
+		pubKeys,
+		edSigLen, blakeHashLen,
+		tmconsensustest.SimpleSignatureScheme{},
+	)
+	sess1, err := pfx.Protocols[1].NewSession(
+		ctx,
+		sid,
+		[]byte("ah1"),
+		cs1, d1,
+	)
+	require.NoError(t, err)
+	defer sess1.Cancel()
+
+	// Now, each side needs to accept the incoming stream.
+	// Order doesn't matter.
+	c01, c10 := pfx.ListenerSet.Dial(t, 0, 1)
+
+	pfx.AddConnection(c01, 0, 1)
+	pfx.AddConnection(c10, 1, 0)
+
+	acceptCtx, acceptCancel := context.WithTimeout(ctx, time.Second)
+	defer acceptCancel()
+
+	s01, err := c10.AcceptUniStream(acceptCtx)
+	require.NoError(t, err)
+
+	s10, err := c01.AcceptUniStream(acceptCtx)
+	require.NoError(t, err)
+
+	// We have to parse the headers from the stream before we can add it to the session.
+	// First the protocol.
+	var b1 [1]byte
+	_, err = io.ReadFull(s01, b1[:])
+	require.NoError(t, err)
+	require.Equal(t, protocolID, b1[0])
+	_, err = io.ReadFull(s10, b1[:])
+	require.NoError(t, err)
+	require.Equal(t, protocolID, b1[0])
+
+	// Then the session ID.
+	sBuf, err := pfx.Protocols[1].ExtractStreamSessionID(s01, nil)
+	require.NoError(t, err)
+	require.Equal(t, sid, sBuf)
+	sBuf, err = pfx.Protocols[0].ExtractStreamSessionID(s10, nil)
+	require.NoError(t, err)
+	require.Equal(t, sid, sBuf)
+
+	// Then the application header.
+	ahBuf, err := wingspan.ExtractStreamApplicationHeader(s01, nil)
+	require.NoError(t, err)
+	require.Equal(t, "ah0", string(ahBuf))
+	ahBuf, err = wingspan.ExtractStreamApplicationHeader(s10, nil)
+	require.NoError(t, err)
+	require.Equal(t, "ah1", string(ahBuf))
+
+	// Now finally, the sessions can accept the streams.
+	require.NoError(t, sess0.AcceptStream(
+		ctx,
+		dconn.Conn{
+			QUIC:  c10,
+			Chain: pfx.ListenerSet.Leaves[1].Chain,
+		},
+		s10,
+	))
+	require.NoError(t, sess1.AcceptStream(
+		ctx,
+		dconn.Conn{
+			QUIC:  c01,
+			Chain: pfx.ListenerSet.Leaves[0].Chain,
+		},
+		s01,
+	))
+}

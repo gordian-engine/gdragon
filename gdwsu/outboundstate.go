@@ -46,10 +46,10 @@ func (s *OutboundState) AddUnverifiedFromPeer(r ReceivedFromPeer) error {
 	return nil
 }
 
-func (s *OutboundState) UnsentPackets() iter.Seq[outboundPacket] {
-	p := outboundPacket{s: s}
+func (s *OutboundState) UnsentPackets() iter.Seq[OutboundPacket] {
+	p := OutboundPacket{s: s}
 	p.ensureBuf()
-	return func(yield func(outboundPacket) bool) {
+	return func(yield func(OutboundPacket) bool) {
 		// We always want to send the precommits first,
 		// as they are capable of completing the round, unlike prevotes.
 
@@ -94,7 +94,7 @@ const fixedMaxOutboundPacketSize = 1 + // IsPrecommit, a whole byte.
 	2 + // KeyIdx (fixed uint16)
 	0 // Placeholder for Sig (fixed size per session)
 
-type outboundPacket struct {
+type OutboundPacket struct {
 	s *OutboundState
 
 	buf []byte
@@ -107,7 +107,7 @@ type outboundPacket struct {
 	newHashIdx      uint16
 }
 
-func (p *outboundPacket) setBytes() {
+func (p *OutboundPacket) setBytes() {
 	p.buf = p.buf[:0]
 	if p.isPrecommit {
 		p.buf = append(p.buf, 1)
@@ -138,7 +138,7 @@ func (p *outboundPacket) setBytes() {
 	p.buf = append(p.buf, p.sig...)
 }
 
-func (p *outboundPacket) ensureBuf() {
+func (p *OutboundPacket) ensureBuf() {
 	if p.buf != nil {
 		return
 	}
@@ -146,16 +146,16 @@ func (p *outboundPacket) ensureBuf() {
 	p.buf = make([]byte, fixedMaxOutboundPacketSize+p.s.sigLen+p.s.hashLen)
 }
 
-func (p *outboundPacket) reset() {
+func (p *OutboundPacket) reset() {
 	// Only keep these fields on p.
-	*p = outboundPacket{s: p.s, buf: p.buf[:0]}
+	*p = OutboundPacket{s: p.s, buf: p.buf[:0]}
 }
 
-func (p outboundPacket) Bytes() []byte {
+func (p OutboundPacket) Bytes() []byte {
 	return p.buf
 }
 
-func (p outboundPacket) MarkSent() {
+func (p OutboundPacket) MarkSent() {
 	if p.isPrecommit {
 		p.s.peerHasPrecommit.Set(uint(p.keyIdx))
 	} else {

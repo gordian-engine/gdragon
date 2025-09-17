@@ -60,7 +60,7 @@ type outboundStateResult struct {
 }
 
 var _ wspacket.CentralState[
-	ParsedPacket, outboundPacket,
+	ParsedPacket, OutboundPacket,
 	ReceivedFromPeer, UpdateFromCentral,
 ] = (*CentralState)(nil)
 
@@ -242,7 +242,7 @@ func (s *CentralState) handleUpdateFromPeer(d ReceivedFromPeer) error {
 // NewOutboundRemoteState implements [wspacket.CentralState].
 func (s *CentralState) NewOutboundRemoteState(ctx context.Context) (
 	wspacket.OutboundRemoteState[
-		ParsedPacket, outboundPacket,
+		ParsedPacket, OutboundPacket,
 		ReceivedFromPeer, UpdateFromCentral,
 	],
 	*dpubsub.Stream[UpdateFromCentral],
@@ -275,6 +275,9 @@ func (s *CentralState) newOutboundState() *OutboundState {
 	return &OutboundState{
 		centralPrevotesAvailable:   s.availablePrevoteBS.Clone(),
 		centralPrecommitsAvailable: s.availablePrecommitBS.Clone(),
+
+		peerHasPrevote:   bitset.MustNew(uint(len(s.keys))),
+		peerHasPrecommit: bitset.MustNew(uint(len(s.keys))),
 
 		prevoteTargets:   s.prevoteTargets,
 		precommitTargets: s.precommitTargets,
