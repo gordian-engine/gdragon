@@ -340,3 +340,85 @@ func (s *CentralState) newInboundState() *InboundState {
 
 	return i
 }
+
+func (s *CentralState) AddLocalPrevote(
+	ctx context.Context,
+	keyIdx uint16,
+	targetHash, sig []byte,
+) error {
+	// Be defensive and validate the signature first.
+	if int(keyIdx) >= len(s.keys) {
+		return fmt.Errorf(
+			"key index %d out of bounds (must be < %d)",
+			keyIdx, len(s.keys),
+		)
+	}
+
+	signContent, err := s.signingMap.PrevoteSignContent(targetHash)
+	if err != nil {
+		return fmt.Errorf("failed to build prevote sign content: %w", err)
+	}
+
+	if !s.keys[keyIdx].Verify(signContent, sig) {
+		return fmt.Errorf(
+			"prevote signature invalid for key index %d and target hash %x",
+			keyIdx, targetHash,
+		)
+	}
+
+	// Now just effectively convert this to a peer delta
+	// and go through that main path.
+	if err := s.UpdateFromPeer(ctx, ReceivedFromPeer{
+		KeyIdx:      keyIdx,
+		Sig:         sig,
+		TargetHash:  targetHash,
+		IsPrecommit: false,
+	}); err != nil {
+		return fmt.Errorf(
+			"failed to apply local prevote: %w", err,
+		)
+	}
+
+	return nil
+}
+
+func (s *CentralState) AddLocalPrecommit(
+	ctx context.Context,
+	keyIdx uint16,
+	targetHash, sig []byte,
+) error {
+	// Be defensive and validate the signature first.
+	if int(keyIdx) >= len(s.keys) {
+		return fmt.Errorf(
+			"key index %d out of bounds (must be < %d)",
+			keyIdx, len(s.keys),
+		)
+	}
+
+	signContent, err := s.signingMap.PrecommitSignContent(targetHash)
+	if err != nil {
+		return fmt.Errorf("failed to build precommit sign content: %w", err)
+	}
+
+	if !s.keys[keyIdx].Verify(signContent, sig) {
+		return fmt.Errorf(
+			"precommit signature invalid for key index %d and target hash %x",
+			keyIdx, targetHash,
+		)
+	}
+
+	// Now just effectively convert this to a peer delta
+	// and go through that main path.
+	if err := s.UpdateFromPeer(ctx, ReceivedFromPeer{
+		KeyIdx:      keyIdx,
+		Sig:         sig,
+		TargetHash:  targetHash,
+		IsPrecommit: true,
+	}); err != nil {
+		return fmt.Errorf(
+			"failed to apply local precommit: %w", err,
+		)
+	}
+
+	return nil
+}

@@ -124,8 +124,9 @@ func (p *OutboundPacket) setBytes() {
 		// We need to reserve a new hash ID.
 		hid = uint16(len(p.s.hashIDs)) + 1
 
-		// And send both the ID and the hash.
-		p.buf = binary.BigEndian.AppendUint16(p.buf, hid)
+		// We send ID 0 indicating we are reserving the next available ID.
+		// No need to use AppendUint16 for this hardcoded case.
+		p.buf = append(p.buf, 0, 0)
 		p.buf = append(p.buf, p.targetHash...)
 
 		p.newHashIdx = hid

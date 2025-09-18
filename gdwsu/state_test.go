@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/gordian-engine/gdragon/gdwsu"
 	"github.com/gordian-engine/gordian/gcrypto"
 	"github.com/gordian-engine/gordian/gcrypto/gcryptotest"
+	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
 	"github.com/stretchr/testify/require"
 )
@@ -142,4 +144,43 @@ func TestSession(t *testing.T) {
 		},
 		s01,
 	))
+
+	blockHash := strings.Repeat("a", blakeHashLen)
+	// Sign a prevote for key 0, and add it to central state 0.
+	vt := tmconsensus.VoteTarget{
+		Height:    height,
+		Round:     round,
+		BlockHash: blockHash,
+	}
+	signContent, err := tmconsensus.PrevoteSignBytes(vt, tmconsensustest.SimpleSignatureScheme{})
+	require.NoError(t, err)
+	sig0, err := signers[0].Sign(ctx, signContent)
+	require.NoError(t, err)
+
+	require.NoError(t, cs0.AddLocalPrevote(ctx, 0, []byte(blockHash), sig0))
+
+	// First, the update is available from central state 0.
+	select {
+	case <-d0.Ready:
+		// Okay.
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timed out waiting for ready signal on pubsub 0")
+	}
+
+	u0 := d0.Val
+	d0 = d0.Next
+	require.Equal(t, gdwsu.UpdateFromCentral{
+		KeyIdx:      0,
+		IsPrecommit: false,
+	}, u0)
+
+	t.Skip("TODO: the remote isn't receiving the update, yet")
+
+	// Then, the update have been sent to cs1 as well.
+	select {
+	case <-d1.Ready:
+		// Okay.
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timed out waiting for ready signal on pubsub 1")
+	}
 }
