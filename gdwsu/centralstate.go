@@ -328,6 +328,8 @@ func (s *CentralState) newInboundState() *InboundState {
 		peerSentPrevote:   bitset.MustNew(uint(len(s.keys))),
 		peerSentPrecommit: bitset.MustNew(uint(len(s.keys))),
 
+		signingMap: s.signingMap,
+
 		prevoteTargets:   s.prevoteTargets,
 		precommitTargets: s.precommitTargets,
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gordian-engine/dragon/dconn"
+	"github.com/gordian-engine/dragon/dpubsub"
 	"github.com/gordian-engine/dragon/wingspan"
 	"github.com/gordian-engine/dragon/wingspan/wingspantest"
 	"github.com/gordian-engine/gdragon/gdwsu"
@@ -19,7 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSession(t *testing.T) {
+// Two peers, each originating their own prevote and precommit.
+func TestSession_pairedVotes(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -152,6 +154,7 @@ func TestSession(t *testing.T) {
 		Round:     round,
 		BlockHash: blockHash,
 	}
+
 	signContent, err := tmconsensus.PrevoteSignBytes(vt, tmconsensustest.SimpleSignatureScheme{})
 	require.NoError(t, err)
 	sig0, err := signers[0].Sign(ctx, signContent)
@@ -160,27 +163,82 @@ func TestSession(t *testing.T) {
 	require.NoError(t, cs0.AddLocalPrevote(ctx, 0, []byte(blockHash), sig0))
 
 	// First, the update is available from central state 0.
-	select {
-	case <-d0.Ready:
-		// Okay.
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Timed out waiting for ready signal on pubsub 0")
-	}
-
-	u0 := d0.Val
-	d0 = d0.Next
-	require.Equal(t, gdwsu.UpdateFromCentral{
+	d0 = requirePubSubUpdate(t, d0, gdwsu.UpdateFromCentral{
 		KeyIdx:      0,
 		IsPrecommit: false,
-	}, u0)
+	})
 
-	t.Skip("TODO: the remote isn't receiving the update, yet")
+	// Then, the update has been sent to cs1 as well.
+	d1 = requirePubSubUpdate(t, d1, gdwsu.UpdateFromCentral{
+		KeyIdx:      0,
+		IsPrecommit: false,
+	})
 
-	// Then, the update have been sent to cs1 as well.
+	// Now go the other direction.
+	sig1, err := signers[1].Sign(ctx, signContent)
+	require.NoError(t, err)
+
+	require.NoError(t, cs1.AddLocalPrevote(ctx, 1, []byte(blockHash), sig1))
+
+	d1 = requirePubSubUpdate(t, d1, gdwsu.UpdateFromCentral{
+		KeyIdx:      1,
+		IsPrecommit: false,
+	})
+
+	d0 = requirePubSubUpdate(t, d0, gdwsu.UpdateFromCentral{
+		KeyIdx:      1,
+		IsPrecommit: false,
+	})
+
+	// Now, precommits.
+	signContent, err = tmconsensus.PrecommitSignBytes(vt, tmconsensustest.SimpleSignatureScheme{})
+	require.NoError(t, err)
+	sig0, err = signers[0].Sign(ctx, signContent)
+	require.NoError(t, err)
+
+	require.NoError(t, cs0.AddLocalPrecommit(ctx, 0, []byte(blockHash), sig0))
+
+	d0 = requirePubSubUpdate(t, d0, gdwsu.UpdateFromCentral{
+		KeyIdx:      0,
+		IsPrecommit: true,
+	})
+
+	d1 = requirePubSubUpdate(t, d1, gdwsu.UpdateFromCentral{
+		KeyIdx:      0,
+		IsPrecommit: true,
+	})
+
+	sig1, err = signers[1].Sign(ctx, signContent)
+	require.NoError(t, err)
+
+	require.NoError(t, cs1.AddLocalPrecommit(ctx, 1, []byte(blockHash), sig1))
+
+	d1 = requirePubSubUpdate(t, d1, gdwsu.UpdateFromCentral{
+		KeyIdx:      1,
+		IsPrecommit: true,
+	})
+
+	d0 = requirePubSubUpdate(t, d0, gdwsu.UpdateFromCentral{
+		KeyIdx:      1,
+		IsPrecommit: true,
+	})
+}
+
+func requirePubSubUpdate[S any](
+	t *testing.T,
+	s *dpubsub.Stream[S],
+	exp S,
+) *dpubsub.Stream[S] {
+	t.Helper()
+
 	select {
-	case <-d1.Ready:
+	case <-s.Ready:
 		// Okay.
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Timed out waiting for ready signal on pubsub 1")
+		t.Fatalf("Timed out waiting for ready signal on %v", s)
 	}
+
+	require.Equal(t, exp, s.Val)
+
+	return s.Next
 }
