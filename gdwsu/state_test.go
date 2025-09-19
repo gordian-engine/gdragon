@@ -276,7 +276,7 @@ func TestSession_votes_hop(t *testing.T) {
 
 		var err error
 		sessions[i], err = pfx.Protocols[i].NewSession(
-			ctx, sid, []byte(fmt.Sprintf("ah%d", i)), css[i], ds[i],
+			ctx, sid, fmt.Appendf(nil, "ah%d", i), css[i], ds[i],
 		)
 		require.NoError(t, err)
 		defer sessions[i].Cancel()
@@ -431,6 +431,72 @@ func TestSession_votes_hop(t *testing.T) {
 			KeyIdx:      1,
 			IsPrecommit: true,
 		})
+	}
+
+	// Now, because we sent and asserted the votes in order,
+	// the individual Prevotes and Precommits channels
+	// will reflect that same order.
+	for _, cs := range css {
+		select {
+		case v := <-cs.Prevotes():
+			require.Equal(t, gdwsu.VerifiedVote{
+				TargetHash: []byte(blockHash),
+				Signature:  sig0,
+
+				KeyIdx:      0,
+				IsPrecommit: false,
+			}, v)
+		default:
+			t.Fatal("Prevote 0 should have been available")
+		}
+
+		select {
+		case v := <-cs.Prevotes():
+			require.Equal(t, gdwsu.VerifiedVote{
+				TargetHash: []byte(blockHash),
+				Signature:  sig2,
+
+				KeyIdx:      2,
+				IsPrecommit: false,
+			}, v)
+		default:
+			t.Fatal("Prevote 2 should have been available")
+		}
+
+		select {
+		case v := <-cs.Precommits():
+			require.Equal(t, gdwsu.VerifiedVote{
+				TargetHash: []byte(blockHash),
+				Signature:  sig1,
+
+				KeyIdx:      1,
+				IsPrecommit: true,
+			}, v)
+		default:
+			t.Fatal("Precommit 1 should have been available")
+		}
+	}
+
+	cancel()
+
+	// Prevotes and Precommits channels were already drained,
+	// so after context cancellation and waiting,
+	// the channels should also be closed.
+	for _, cs := range css {
+		cs.Wait()
+		select {
+		case _, ok := <-cs.Prevotes():
+			require.False(t, ok)
+		default:
+			t.Fatalf("Prevotes channel should have been closed")
+		}
+
+		select {
+		case _, ok := <-cs.Precommits():
+			require.False(t, ok)
+		default:
+			t.Fatalf("Precommits channel should have been closed")
+		}
 	}
 }
 

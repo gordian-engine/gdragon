@@ -41,6 +41,8 @@ type CentralState struct {
 	inboundStateRequests  chan (chan<- inboundStateResult)
 	outboundStateRequests chan (chan<- outboundStateResult)
 
+	verifiedPrevotes, verifiedPrecommits chan VerifiedVote
+
 	done chan struct{}
 }
 
@@ -57,6 +59,15 @@ type inboundStateResult struct {
 type outboundStateResult struct {
 	O *OutboundState
 	U *dpubsub.Stream[UpdateFromCentral]
+}
+
+// VerifiedVote is the value used for the [*CentralState.Prevotes] and [*CentralState.Precommits] channels.
+type VerifiedVote struct {
+	TargetHash []byte
+	Signature  []byte
+
+	KeyIdx      uint16
+	IsPrecommit bool
 }
 
 var _ wspacket.CentralState[
@@ -115,6 +126,12 @@ func NewCentralState(
 		inboundStateRequests:  make(chan chan<- inboundStateResult),
 		outboundStateRequests: make(chan chan<- outboundStateResult),
 
+		// Both buffered to the same size as the number of keys,
+		// as we will send at most one vote per key,
+		// and we do not want sends to block.
+		verifiedPrevotes:   make(chan VerifiedVote, len(keys)),
+		verifiedPrecommits: make(chan VerifiedVote, len(keys)),
+
 		done: make(chan struct{}),
 	}
 
@@ -125,6 +142,9 @@ func NewCentralState(
 
 func (s *CentralState) mainLoop(ctx context.Context) {
 	defer close(s.done)
+
+	defer close(s.verifiedPrecommits)
+	defer close(s.verifiedPrevotes)
 
 	for {
 		select {
@@ -151,6 +171,18 @@ func (s *CentralState) mainLoop(ctx context.Context) {
 
 func (s *CentralState) Wait() {
 	<-s.done
+}
+
+// Prevotes returns a receive-only channel of verified prevotes.
+// The channel is closed when s's context is canceled.
+func (s *CentralState) Prevotes() <-chan VerifiedVote {
+	return s.verifiedPrevotes
+}
+
+// Precommits returns a receive-only channel of verified precommits.
+// The channel is closed when s's context is canceled.
+func (s *CentralState) Precommits() <-chan VerifiedVote {
+	return s.verifiedPrecommits
 }
 
 // UpdateFromPeer implements [wspacket.CentralState].
@@ -220,6 +252,16 @@ func (s *CentralState) handleUpdateFromPeer(d ReceivedFromPeer) error {
 		s.precommitTargets[d.KeyIdx] = d.TargetHash
 
 		s.availablePrecommitBS.Set(uint(d.KeyIdx))
+
+		// Channel buffered to full key length,
+		// so this will not block, as long as we only send each vote once.
+		s.verifiedPrecommits <- VerifiedVote{
+			TargetHash: d.TargetHash,
+			Signature:  d.Sig,
+
+			KeyIdx:      d.KeyIdx,
+			IsPrecommit: true,
+		}
 	} else {
 		s.prevoteSigs[d.KeyIdx] = append(s.prevoteSigs[d.KeyIdx], d.Sig...)
 		d.Sig = s.prevoteSigs[d.KeyIdx]
@@ -227,6 +269,16 @@ func (s *CentralState) handleUpdateFromPeer(d ReceivedFromPeer) error {
 		s.prevoteTargets[d.KeyIdx] = d.TargetHash
 
 		s.availablePrevoteBS.Set(uint(d.KeyIdx))
+
+		// Channel buffered to full key length,
+		// so this will not block, as long as we only send each vote once.
+		s.verifiedPrevotes <- VerifiedVote{
+			TargetHash: d.TargetHash,
+			Signature:  d.Sig,
+
+			KeyIdx:      d.KeyIdx,
+			IsPrecommit: false,
+		}
 	}
 
 	// Convert to an update from central now.
