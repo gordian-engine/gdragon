@@ -3,6 +3,7 @@ package gdbc_test
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"math/rand/v2"
 	"testing"
@@ -52,7 +53,9 @@ func TestBreathcast_hop(t *testing.T) {
 			log.With("idx", i), gdbc.AdapterConfig{
 				Protocol:   p,
 				ProtocolID: protocolID,
-				Marshaler:  codec,
+
+				Hasher:   bcsha256.Hasher{},
+				HashSize: bcsha256.HashSize,
 			},
 		)
 		require.NoError(t, err)
@@ -66,28 +69,36 @@ func TestBreathcast_hop(t *testing.T) {
 
 	fx := tmconsensustest.NewEd25519Fixture(3)
 
+	// Make the incomplete proposal first.
 	ph := fx.NextProposedHeader(blockData0, 0)
 
-	/*
-		ann := breathcastAnnotation{}
-		var err error
-		ph.Annotations.Driver, err = json.Marshal(ann)
-		require.NoError(t, err)
-	*/
+	// Now, using the block data generated,
+	// prepare the origination.
+	nonce := []byte("some nonce value")
+	po, err := as[0].PrepareOrigination(gdbc.PrepareOriginationConfig{
+		BlockData: blockData0,
+
+		ParityRatio: 0.25,
+
+		HashNonce: nonce,
+
+		Height:      ph.Header.Height,
+		Round:       ph.Round,
+		ProposerIdx: 0,
+	})
+	require.NoError(t, err)
+
+	// Add the broadcast details on the proposal header,
+	// so the recipients can decode them and accept a broadcast.
+	ph.Annotations.Driver, err = json.Marshal(po.BroadcastDetails())
+	require.NoError(t, err)
 
 	fx.SignProposal(ctx, &ph, 0)
 
-	nonce := []byte("some nonce value")
+	mph, err := codec.MarshalProposedHeader(ph)
+	require.NoError(t, err)
 
-	bop0, bi0, err := as[0].Originate(
-		ctx,
-		blockData0,
-		ph,
-		ph.Header.Height, ph.Round,
-		0,    // Proposer index.
-		0.25, // Parity ratio.
-		nonce,
-	)
+	bop0, err := as[0].Originate(ctx, mph, po)
 	require.NoError(t, err)
 	defer bop0.Wait()
 	defer cancel()
@@ -129,26 +140,29 @@ func TestBreathcast_hop(t *testing.T) {
 	var gotPH0 tmconsensus.ProposedHeader
 	require.NoError(t, codec.UnmarshalProposedHeader(ah0, &gotPH0))
 
+	var gotBD0 gdbc.BroadcastDetails
+	require.NoError(t, json.Unmarshal(gotPH0.Annotations.Driver, &gotBD0))
+
 	// First we agree on the broadcast operation.
 	bop1, err := pfx.Protocols[1].NewIncomingBroadcast(ctx, breathcast.IncomingBroadcastConfig{
 		BroadcastID: bid,
 
 		AppHeader: ah0,
 
-		NData:   bi0.NData,
-		NParity: bi0.NParity,
+		NData:   gotBD0.NData,
+		NParity: gotBD0.NParity,
 
-		TotalDataSize: bi0.TotalDataSize,
+		TotalDataSize: int(gotBD0.TotalDataSize),
 
 		// Fixed values.
 		Hasher:   bcsha256.Hasher{},
 		HashSize: bcsha256.HashSize,
 
-		HashNonce: bi0.Nonce,
+		HashNonce: gotBD0.HashNonce,
 
-		RootProofs: bi0.RootProofs,
+		RootProofs: gotBD0.RootProofs,
 
-		ChunkSize: bi0.ChunkSize,
+		ChunkSize: gotBD0.ChunkSize,
 	})
 	require.NoError(t, err)
 
@@ -178,26 +192,29 @@ func TestBreathcast_hop(t *testing.T) {
 	var gotPH1 tmconsensus.ProposedHeader
 	require.NoError(t, codec.UnmarshalProposedHeader(ah1, &gotPH1))
 
+	var gotBD1 gdbc.BroadcastDetails
+	require.NoError(t, json.Unmarshal(gotPH1.Annotations.Driver, &gotBD1))
+
 	// Then we agree on the relayed broadcast operation.
 	bop2, err := pfx.Protocols[2].NewIncomingBroadcast(ctx, breathcast.IncomingBroadcastConfig{
 		BroadcastID: bid,
 
 		AppHeader: ah1,
 
-		NData:   bi0.NData,
-		NParity: bi0.NParity,
+		NData:   gotBD1.NData,
+		NParity: gotBD1.NParity,
 
-		TotalDataSize: bi0.TotalDataSize,
+		TotalDataSize: int(gotBD1.TotalDataSize),
 
 		// Fixed values.
 		Hasher:   bcsha256.Hasher{},
 		HashSize: bcsha256.HashSize,
 
-		HashNonce: bi0.Nonce,
+		HashNonce: gotBD1.HashNonce,
 
-		RootProofs: bi0.RootProofs,
+		RootProofs: gotBD1.RootProofs,
 
-		ChunkSize: bi0.ChunkSize,
+		ChunkSize: gotBD1.ChunkSize,
 	})
 	require.NoError(t, err)
 

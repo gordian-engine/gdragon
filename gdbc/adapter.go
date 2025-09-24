@@ -7,9 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/gordian-engine/dragon/breathcast"
-	"github.com/gordian-engine/dragon/breathcast/bcmerkle/bcsha256"
-	"github.com/gordian-engine/gordian/tm/tmcodec"
-	"github.com/gordian-engine/gordian/tm/tmconsensus"
+	"github.com/gordian-engine/dragon/breathcast/bcmerkle"
 )
 
 // The size of broadast IDs (64-bit height, 32-bit round, and 16-bit proposer ID).
@@ -23,7 +21,8 @@ type Adapter struct {
 
 	p *breathcast.Protocol
 
-	marshaler tmcodec.Marshaler
+	hasher   bcmerkle.Hasher
+	hashSize int
 
 	protocolID byte
 
@@ -36,7 +35,8 @@ type AdapterConfig struct {
 
 	ProtocolID byte
 
-	Marshaler tmcodec.Marshaler
+	Hasher   bcmerkle.Hasher
+	HashSize int
 }
 
 // NewAdapter returns a new Adapter instance based on the given config.
@@ -51,111 +51,150 @@ func NewAdapter(
 
 		protocolID: cfg.ProtocolID,
 
-		marshaler: cfg.Marshaler,
+		hasher:   cfg.Hasher,
+		hashSize: cfg.HashSize,
 	}, nil
 }
 
-// BroadcastInfo is a temporary struct indicating
-// the configuration created inside [*Adapter.Originate].
+// PrepareOriginationConfig is the configuration for [*Adapter.PrepareOrigination].
+type PrepareOriginationConfig struct {
+	BlockData []byte
+
+	ParityRatio float32
+
+	HashNonce []byte
+
+	Height      uint64
+	Round       uint32
+	ProposerIdx uint16
+}
+
+// PreparedOrigination is the return value of [*Adapter.PrepareOrigination].
+// It wraps a [breathcast.PreparedOrigination] and other values
+// necessary to successfully call [*Adapter.Originate].
+type PreparedOrigination struct {
+	bc  breathcast.PreparedOrigination
+	bid []byte
+
+	hashNonce []byte
+
+	totalDataSize uint32
+}
+
+// BroadcastDetails returns the broadcast details
+// for the prepared origination.
 //
-// The API for Originate needs to change, and BroadcastInfo will go away.
-type BroadcastInfo struct {
+// This value should be encoded in the proposed header's annotations,
+// and the proposed header should be serialized as the app header value
+// on a broadcast operation.
+//
+// This allows recipients to parse the app header
+// and then have all necessary information
+// to properly receive a broadcast.
+func (po PreparedOrigination) BroadcastDetails() BroadcastDetails {
+	return BroadcastDetails{
+		NData:   uint16(po.bc.NumData),
+		NParity: uint16(po.bc.NumParity),
+
+		TotalDataSize: po.totalDataSize,
+
+		ChunkSize: uint16(po.bc.ChunkSize),
+
+		HashNonce: po.hashNonce,
+
+		RootProofs: po.bc.RootProof,
+	}
+}
+
+// BroadcastDetails contains the data necessary to accept an incoming broadcast.
+// For block data, this should be encoded in the proposed header annotations.
+type BroadcastDetails struct {
 	NData, NParity uint16
+
+	TotalDataSize uint32
 
 	ChunkSize uint16
 
-	TotalDataSize int
+	HashNonce []byte
 
 	RootProofs [][]byte
-
-	Nonce []byte
 }
 
-// Originate creates and returns a new broadcast operation.
-//
-// TODO: this needs to be split into several discrete steps,
-// likely at the caller's responsibility:
-//  1. Prepare origination on blockData
-//  2. Add an annotation to the proposed header with the breathcast configuration
-//     so that receivers can set up the broadcast operation.
-//  3. Sign the proposed header.
-//  4. Marshal the proposed header and pass to a method like this Originate?
-func (a *Adapter) Originate(
-	ctx context.Context,
-	blockData []byte,
-	proposedHeader tmconsensus.ProposedHeader,
-	height uint64,
-	round uint32,
-	proposerIdx uint16,
-	parityRatio float32,
-	hashNonce []byte,
-) (*breathcast.BroadcastOperation, BroadcastInfo, error) {
-	// We are currently serializing the proposed header internally here,
-	// but it may be more appropriate to raise that out of this method
-	// in order to allow the driver to add more data if needed.
-	appHeader, err := a.marshaler.MarshalProposedHeader(proposedHeader)
-	if err != nil {
-		return nil, BroadcastInfo{}, fmt.Errorf(
-			"failed to marshal proposed header: %w", err,
-		)
-	}
-
+// PrepareOrigination returns an adapter-specific prepared origination type,
+// to be passed to [*Adapter.Originate].
+func (a *Adapter) PrepareOrigination(cfg PrepareOriginationConfig) (
+	PreparedOrigination, error,
+) {
 	bid := make([]byte, BroadcastIDLen)
-	binary.BigEndian.PutUint64(bid, height)
-	binary.BigEndian.PutUint32(bid[8:], round)
-	binary.BigEndian.PutUint16(bid[8+4:], proposerIdx)
+	binary.BigEndian.PutUint64(bid, cfg.Height)
+	binary.BigEndian.PutUint32(bid[8:], cfg.Round)
+	binary.BigEndian.PutUint16(bid[8+4:], cfg.ProposerIdx)
 
-	po, err := breathcast.PrepareOrigination(blockData, breathcast.PrepareOriginationConfig{
+	bcpo, err := breathcast.PrepareOrigination(cfg.BlockData, breathcast.PrepareOriginationConfig{
 		MaxChunkSize: 1100, // TODO: this value needs to be properly calculated.
 
 		ProtocolID: a.protocolID,
 
 		BroadcastID: bid,
 
-		ParityRatio: parityRatio,
+		ParityRatio: cfg.ParityRatio,
 
 		HeaderProofTier: 2, // TODO: this should be configurable.
 
-		Hasher: bcsha256.Hasher{}, // TODO: this should be configurable.
+		Hasher:   a.hasher,
+		HashSize: a.hashSize,
 
-		HashSize: bcsha256.HashSize,
-
-		Nonce: hashNonce,
+		Nonce: cfg.HashNonce,
 	})
 	if err != nil {
-		return nil, BroadcastInfo{}, fmt.Errorf(
+		return PreparedOrigination{}, fmt.Errorf(
 			"failed to prepare origination: %w", err,
 		)
 	}
 
+	return PreparedOrigination{
+		bc: bcpo,
+
+		bid: bid,
+
+		totalDataSize: uint32(len(cfg.BlockData)),
+
+		hashNonce: cfg.HashNonce,
+	}, nil
+}
+
+// Originate creates and returns a new broadcast operation.
+//
+// The typical flow for this is:
+//  1. Produce block data
+//  2. Pass the block data and other config to [*Adapter.PrepareOrigination]
+//  3. On the returned [PreparedOrigination], gather the [PreparedOrigination.BroadcastDetails]
+//     which contains the information for peers to decode the broadcast
+//  4. Serialize the [BroadcastDetails] as part of the driver annotations on the [tmconsensus.ProposedHeader]
+//  5. Sign the updated proposed header
+//  6. Serialize the entire proposed header as the appHeader argument to this method
+func (a *Adapter) Originate(
+	ctx context.Context,
+	appHeader []byte,
+	po PreparedOrigination,
+) (*breathcast.BroadcastOperation, error) {
 	bop, err := a.p.NewOrigination(ctx, breathcast.OriginationConfig{
-		BroadcastID: bid,
+		BroadcastID: po.bid,
 
 		AppHeader: appHeader,
-		Packets:   po.Packets,
+		Packets:   po.bc.Packets,
 
-		NData: uint16(po.NumData),
+		NData: uint16(po.bc.NumData),
 
-		TotalDataSize: len(blockData),
+		TotalDataSize: int(po.totalDataSize),
 
-		ChunkSize: po.ChunkSize,
+		ChunkSize: po.bc.ChunkSize,
 	})
 	if err != nil {
-		return nil, BroadcastInfo{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"failed to create broadcast operation: %w", err,
 		)
 	}
 
-	return bop, BroadcastInfo{
-		NData:   uint16(po.NumData),
-		NParity: uint16(po.NumParity),
-
-		ChunkSize: uint16(po.ChunkSize),
-
-		TotalDataSize: len(blockData),
-
-		RootProofs: po.RootProof,
-
-		Nonce: hashNonce,
-	}, nil
+	return bop, nil
 }
