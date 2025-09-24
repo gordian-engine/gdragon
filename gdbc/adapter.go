@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log/slog"
 
 	"github.com/gordian-engine/dragon/breathcast"
@@ -197,4 +198,64 @@ func (a *Adapter) Originate(
 	}
 
 	return bop, nil
+}
+
+// IncomingBroadcastConfig is the configuration type for [*Adapter.NewIncomingBroadcast].
+type IncomingBroadcastConfig struct {
+	// Necessary to relay the broadcast to other peers.
+	BroadcastID []byte
+	AppHeader   []byte
+
+	BroadcastDetails BroadcastDetails
+}
+
+// NewIncomingBroadcast creates a new broadcast operation
+// based on incoming data from a peer.
+//
+// Note that the caller must still call [*breathcast.BroadcastOperation.AcceptBroadcast]
+// in order to actually read data from the underlying QUIC stream.
+func (a *Adapter) NewIncomingBroadcast(
+	ctx context.Context,
+	cfg IncomingBroadcastConfig,
+) (*breathcast.BroadcastOperation, error) {
+	bd := cfg.BroadcastDetails
+	bop, err := a.p.NewIncomingBroadcast(ctx, breathcast.IncomingBroadcastConfig{
+		BroadcastID: cfg.BroadcastID,
+
+		AppHeader: cfg.AppHeader,
+
+		NData:   bd.NData,
+		NParity: bd.NParity,
+
+		TotalDataSize: int(bd.TotalDataSize),
+
+		Hasher:   a.hasher,
+		HashSize: a.hashSize,
+
+		HashNonce: bd.HashNonce,
+
+		RootProofs: bd.RootProofs,
+
+		ChunkSize: bd.ChunkSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to create incoming broadcast operation: %w", err,
+		)
+	}
+
+	return bop, nil
+}
+
+// ExtractStreamBroadcastID extracts the broadcast ID from r
+// (which should be a [quic.ReceiveStream]).
+// The extracted data is appended to the given dst slice,
+// which is permitted to be nil.
+//
+// The caller is responsible for setting any read deadlines.
+//
+// It is assumed that the caller has already consumed
+// the protocol ID byte matching [ProtocolConfig.ProtocolID].
+func (a *Adapter) ExtractStreamBroadcastID(r io.Reader, dst []byte) ([]byte, error) {
+	return a.p.ExtractStreamBroadcastID(r, dst)
 }

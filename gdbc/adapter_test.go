@@ -125,7 +125,7 @@ func TestBreathcast_hop(t *testing.T) {
 	require.Equal(t, protocolID, b1[0])
 
 	// Broadcast ID must match height, round, and proposer index.
-	bid, err := pfx.Protocols[1].ExtractStreamBroadcastID(s01, nil)
+	bid, err := as[1].ExtractStreamBroadcastID(s01, nil)
 	require.NoError(t, err)
 	require.Equal(t, ph.Header.Height, binary.BigEndian.Uint64(bid))
 	require.Equal(t, ph.Round, binary.BigEndian.Uint32(bid[8:]))
@@ -144,25 +144,11 @@ func TestBreathcast_hop(t *testing.T) {
 	require.NoError(t, json.Unmarshal(gotPH0.Annotations.Driver, &gotBD0))
 
 	// First we agree on the broadcast operation.
-	bop1, err := pfx.Protocols[1].NewIncomingBroadcast(ctx, breathcast.IncomingBroadcastConfig{
+	bop1, err := as[1].NewIncomingBroadcast(ctx, gdbc.IncomingBroadcastConfig{
 		BroadcastID: bid,
+		AppHeader:   ah0,
 
-		AppHeader: ah0,
-
-		NData:   gotBD0.NData,
-		NParity: gotBD0.NParity,
-
-		TotalDataSize: int(gotBD0.TotalDataSize),
-
-		// Fixed values.
-		Hasher:   bcsha256.Hasher{},
-		HashSize: bcsha256.HashSize,
-
-		HashNonce: gotBD0.HashNonce,
-
-		RootProofs: gotBD0.RootProofs,
-
-		ChunkSize: gotBD0.ChunkSize,
+		BroadcastDetails: gotBD0,
 	})
 	require.NoError(t, err)
 
@@ -180,7 +166,7 @@ func TestBreathcast_hop(t *testing.T) {
 	require.Equal(t, protocolID, b1[0])
 
 	// Broadcast ID must match height, round, and proposer index.
-	bid, err = pfx.Protocols[1].ExtractStreamBroadcastID(s12, nil)
+	bid, err = as[2].ExtractStreamBroadcastID(s12, nil)
 	require.NoError(t, err)
 	require.Equal(t, ph.Header.Height, binary.BigEndian.Uint64(bid))
 	require.Equal(t, ph.Round, binary.BigEndian.Uint32(bid[8:]))
@@ -196,25 +182,11 @@ func TestBreathcast_hop(t *testing.T) {
 	require.NoError(t, json.Unmarshal(gotPH1.Annotations.Driver, &gotBD1))
 
 	// Then we agree on the relayed broadcast operation.
-	bop2, err := pfx.Protocols[2].NewIncomingBroadcast(ctx, breathcast.IncomingBroadcastConfig{
+	bop2, err := as[2].NewIncomingBroadcast(ctx, gdbc.IncomingBroadcastConfig{
 		BroadcastID: bid,
+		AppHeader:   ah1,
 
-		AppHeader: ah1,
-
-		NData:   gotBD1.NData,
-		NParity: gotBD1.NParity,
-
-		TotalDataSize: int(gotBD1.TotalDataSize),
-
-		// Fixed values.
-		Hasher:   bcsha256.Hasher{},
-		HashSize: bcsha256.HashSize,
-
-		HashNonce: gotBD1.HashNonce,
-
-		RootProofs: gotBD1.RootProofs,
-
-		ChunkSize: gotBD1.ChunkSize,
+		BroadcastDetails: gotBD1,
 	})
 	require.NoError(t, err)
 
