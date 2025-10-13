@@ -5,7 +5,7 @@ go 1.24.1
 require (
 	github.com/bits-and-blooms/bitset v1.22.0
 	github.com/gordian-engine/dragon v0.0.0-20250916130736-ec851eb86491
-	github.com/gordian-engine/gordian v0.0.0-20250630203756-37c92ef4ec08
+	github.com/gordian-engine/gordian v0.0.0-20251008185402-61d3b84483ba
 	github.com/neilotoole/slogt v1.1.0
 	github.com/quic-go/quic-go v0.51.0
 	github.com/stretchr/testify v1.10.0
