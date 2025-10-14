@@ -6,19 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
+	"github.com/gordian-engine/dragon/dcert"
+	"github.com/gordian-engine/dragon/dconn"
+	"github.com/gordian-engine/dragon/dpubsub"
 	"github.com/gordian-engine/dragon/wingspan"
 	"github.com/gordian-engine/gdragon/gdbc"
 	"github.com/gordian-engine/gdragon/gdwsu"
 	"github.com/gordian-engine/gordian/gcrypto"
+	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
+	"github.com/quic-go/quic-go"
 )
 
 // OriginationDetails is the struct that the driver or application must provide
 // in order for the [NetworkAdapter] to be able to broadcast a proposed block.
 type OriginationDetails struct {
-	// This is the serialized proposed headers.
+	// This is the serialized proposed header.
 	AppHeader []byte
 
 	// The prepared origination details in order to call Originate.
@@ -55,11 +61,68 @@ type NetworkAdapter struct {
 
 	startCh chan (<-chan tmelink.NetworkViewUpdate)
 
+	cc *dpubsub.Stream[dconn.Change]
+
+	sab streamAccepterBase
+
+	wg   sync.WaitGroup
 	done chan struct{}
 }
 
+// AcceptedStream is a value used for the accepted stream channel
+// provided to [NetworkAdapterConfig], for the application to consume.
+type AcceptedStream struct {
+	Conn   dconn.Conn
+	Stream quic.Stream
+
+	ProtocolID byte
+}
+
+// AcceptedUniStream is a value used for the accepted unidirectional stream channel
+// provided to [NetworkAdapterConfig], for the application to consume.
+type AcceptedUniStream struct {
+	Conn   dconn.Conn
+	Stream quic.ReceiveStream
+
+	ProtocolID byte
+}
+
+// breathcastCheck is the value sent from the [streamAccepter]
+// to the [NetworkAdapter], for a fast check on whether a broadcast
+// matches an existing session or whether it needs to be fully parsed.
+type breathcastCheck struct {
+	BroadcastID, AppHeader []byte
+
+	CheckResult chan breathcastCheckResult
+}
+
+// breathcastCheckResult is the result value for [breathcastCheck]
+// sent from the [NetworkAdapter] to the [streamAccepter].
+type breathcastCheckResult uint8
+
+const (
+	// TODO: probably need more granular reject states.
+	// One to indicate "too old" but otherwise valid,
+	// another for something like malformed, maybe?
+	breathcastCheckRejected breathcastCheckResult = iota
+
+	// Accepted by the NetworkAdapter;
+	// no further work needed in the streamAccepter.
+	breathcastCheckAccepted
+
+	// Unrecognized by the NetworkAdapter but possibly valid.
+	// The streamAccepter needs to fully process the value.
+	breathcastCheckNeedsProcessed
+)
+
 // NetworkAdapterConfig is the configuration value for [NewNetworkAdapter].
 type NetworkAdapterConfig struct {
+	// The initial connections, just like in the protocols.
+	InitialConnections []dconn.Conn
+
+	// The stream of connection changes, just like in the protocols.
+	ConnectionChanges *dpubsub.Stream[dconn.Change]
+
 	BreathcastAdapter *gdbc.Adapter
 
 	Wingspan *wingspan.Protocol[
@@ -88,6 +151,19 @@ type NetworkAdapterConfig struct {
 	// inability to retrieve the origination details for a header
 	// proposed by the current validator is fatal.
 	GetOriginationDetailsFunc func(blockHash []byte) OriginationDetails
+
+	// The [NetworkAdapter] starts goroutines per connection to accept streams.
+	// If the stream has a protocol ID that does not match a protocol owned by the adapter,
+	// that stream is sent on one of these two channels.
+	// The application is responsible for draining these channels;
+	// otherwise the network adapter will eventually deadlock.
+	// These channels should be buffered.
+	// The correct size is probably a multiple of the active peer set size in Dragon.
+	AcceptedStreamCh    chan<- AcceptedStream
+	AcceptedUniStreamCh chan<- AcceptedUniStream
+
+	// How to deserialize a proposed header from a breathcast application header.
+	Unmarshaler tmcodec.Unmarshaler
 }
 
 // NewNetworkAdapter returns a new NetworkAdapter.
@@ -113,10 +189,19 @@ func NewNetworkAdapter(
 		// 1-buffered so the Start call doesn't block.
 		startCh: make(chan (<-chan tmelink.NetworkViewUpdate), 1),
 
+		sab: streamAccepterBase{
+			AcceptedStreamCh:    cfg.AcceptedStreamCh,
+			AcceptedUniStreamCh: cfg.AcceptedUniStreamCh,
+
+			Unmarshaler: cfg.Unmarshaler,
+
+			BCA: cfg.BreathcastAdapter,
+		},
+
 		done: make(chan struct{}),
 	}
 
-	go s.mainLoop(ctx)
+	go s.mainLoop(ctx, cfg.InitialConnections)
 
 	return s
 }
@@ -135,10 +220,12 @@ func (s *NetworkAdapter) SetConsensusHandler(h tmconsensus.ConsensusHandler) {
 	s.h = h
 }
 
-func (s *NetworkAdapter) mainLoop(ctx context.Context) {
+func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn) {
 	defer close(s.done)
 
 	// First, block on the start signal.
+	// (We could possibly consume the connection changes here,
+	// but for now we will save that for the looped select.)
 	var updates <-chan tmelink.NetworkViewUpdate
 	select {
 	case <-ctx.Done():
@@ -147,6 +234,12 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context) {
 		// Got the updates channel; the source channel will never be used again,
 		// so let GC take it.
 		s.startCh = nil
+	}
+
+	// Set up stream accepters on the initial connections.
+	accepters := make(map[dcert.LeafCertHandle]*streamAccepter, len(initialConns))
+	for _, conn := range initialConns {
+		s.addStreamAccepter(ctx, accepters, conn)
 	}
 
 	// Now the real main loop.
@@ -158,13 +251,40 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context) {
 
 		case u := <-updates:
 			s.processUpdate(ctx, liveSessions, u)
+
+		case <-s.cc.Ready:
+			s.handleConnectionChange(ctx, accepters)
 		}
 	}
+}
+
+// addStreamAccepter creates a new streamAccepter instance
+// for the given connection, and runs its background goroutines.
+func (s *NetworkAdapter) addStreamAccepter(
+	ctx context.Context,
+	accepters map[dcert.LeafCertHandle]*streamAccepter,
+	conn dconn.Conn,
+) {
+	connCtx, cancel := context.WithCancelCause(ctx)
+
+	sa := &streamAccepter{
+		Conn:   conn,
+		Cancel: cancel,
+
+		b: &s.sab,
+	}
+
+	s.wg.Add(2)
+	go sa.AcceptStreams(connCtx, &s.wg)
+	go sa.AcceptUniStreams(connCtx, &s.wg)
+
+	accepters[conn.Chain.LeafHandle] = sa
 }
 
 // Wait blocks until all background work for s has finished.
 func (s *NetworkAdapter) Wait() {
 	<-s.done
+	s.wg.Wait()
 }
 
 // processUpdate handles a single network view update from the core engine.
@@ -193,6 +313,9 @@ func (s *NetworkAdapter) handleSessionChanges(
 			s.handleExpiredSession(liveSessions, c.Height, c.Round)
 			continue
 		}
+
+		// For now, we aren't doing anything with sessions in the grace period.
+		// They will expire upon the expiration signal from the engine.
 	}
 }
 
@@ -366,4 +489,42 @@ func (s *NetworkAdapter) initiateBroadcasts(
 		Op:     bop,
 		Cancel: cancel,
 	}
+}
+
+// handleConnectionChange handles a new value on s.cc (the ConnChange pubsub stream).
+func (s *NetworkAdapter) handleConnectionChange(
+	ctx context.Context,
+	accepters map[dcert.LeafCertHandle]*streamAccepter,
+) {
+	cc := s.cc.Val
+	s.cc = s.cc.Next
+
+	if !cc.Adding {
+		// Removing is the simple case.
+		sa, ok := accepters[cc.Conn.Chain.LeafHandle]
+		if !ok {
+			panic(errors.New(
+				"BUG: attempting to handle a removed connection lacking a stream accepter",
+			))
+		}
+
+		sa.Cancel(errors.New("connection closing"))
+
+		// TODO: where should we call sa.Wait?
+
+		delete(accepters, cc.Conn.Chain.LeafHandle)
+		return
+	}
+
+	// Adding. First, sanity check that we don't already have an accepter for this connection.
+	if _, ok := accepters[cc.Conn.Chain.LeafHandle]; ok {
+		// A second connection from the same peer, or at least a peer with an identical Chain,
+		// should have been blocked earlier in the Dragon peer management code.
+		panic(fmt.Errorf(
+			"BUG: second connection from same peer reached network adapter (%#v)",
+			cc.Conn.Chain,
+		))
+	}
+
+	s.addStreamAccepter(ctx, accepters, cc.Conn)
 }
