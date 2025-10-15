@@ -151,6 +151,8 @@ func NewNetworkAdapter(
 		// 1-buffered so the Start call doesn't block.
 		startCh: make(chan (<-chan tmelink.NetworkViewUpdate), 1),
 
+		cc: cfg.ConnectionChanges,
+
 		sab: gdnai.StreamAccepterBase{
 			AcceptedStreamCh:    cfg.AcceptedStreamCh,
 			AcceptedUniStreamCh: cfg.AcceptedUniStreamCh,
