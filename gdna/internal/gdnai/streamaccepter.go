@@ -1,4 +1,4 @@
-package gdna
+package gdnai
 
 import (
 	"context"
@@ -18,14 +18,32 @@ import (
 
 const readProtocolIDTimeout = 50 * time.Millisecond
 
-// streamAccepterBase contains the unchanging base values for a [streamAccepter].
-type streamAccepterBase struct {
+// AcceptedStream is a value used for the accepted stream channel
+// provided to [NetworkAdapterConfig], for the application to consume.
+type AcceptedStream struct {
+	Conn   dconn.Conn
+	Stream quic.Stream
+
+	ProtocolID byte
+}
+
+// AcceptedUniStream is a value used for the accepted unidirectional stream channel
+// provided to [NetworkAdapterConfig], for the application to consume.
+type AcceptedUniStream struct {
+	Conn   dconn.Conn
+	Stream quic.ReceiveStream
+
+	ProtocolID byte
+}
+
+// StreamAccepterBase contains the unchanging base values for a [StreamAccepter].
+type StreamAccepterBase struct {
 	AcceptedStreamCh    chan<- AcceptedStream
 	AcceptedUniStreamCh chan<- AcceptedUniStream
 
 	// The streamAccepter instances send on this channel,
 	// and the NetworkAdapter receives on it.
-	BreathcastCheck chan breathcastCheck
+	BreathcastCheck chan BreathcastCheck
 
 	Unmarshaler tmcodec.Unmarshaler
 
@@ -35,30 +53,48 @@ type streamAccepterBase struct {
 	BCID, WSID byte
 }
 
-// streamAccepter handles accepting individual streams for a single connection.
+// StreamAccepter handles accepting individual streams for a single connection.
 //
 // Upon accepting a stream, if the protocol ID matches the ID for
 // block propagation or vote gossip, it is directly associated with
 // the corresponding protocol object.
 // Otherwise, the value is sent on the provided accepted stream channel.
-type streamAccepter struct {
-	Conn dconn.Conn
+type StreamAccepter struct {
+	conn dconn.Conn
 
 	// TODO: most of the cases where we close the stream accepter,
 	// we should also be closing the stream or perhaps even the underlying connection.
-	Cancel context.CancelCauseFunc
+	cancel context.CancelCauseFunc
 
-	b *streamAccepterBase
+	b *StreamAccepterBase
 }
 
-func (a *streamAccepter) AcceptStreams(
+func NewStreamAccepter(
+	conn dconn.Conn,
+	cancel context.CancelCauseFunc,
+	base *StreamAccepterBase,
+) *StreamAccepter {
+	return &StreamAccepter{
+		conn:   conn,
+		cancel: cancel,
+		b:      base,
+	}
+}
+
+// Cancel ends a's underlying goroutines that accept QUIC streams.
+func (a *StreamAccepter) Cancel(e error) {
+	// TODO: this may need to be aware of an active stream as well.
+	a.cancel(e)
+}
+
+func (a *StreamAccepter) AcceptStreams(
 	ctx context.Context,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
 
 	for {
-		s, err := a.Conn.QUIC.AcceptStream(ctx)
+		s, err := a.conn.QUIC.AcceptStream(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				// Assume context cancellation was the cause of the failed accept.
@@ -67,17 +103,17 @@ func (a *streamAccepter) AcceptStreams(
 				return
 			}
 
-			a.Cancel(fmt.Errorf("failed to accept stream: %w", err))
+			a.cancel(fmt.Errorf("failed to accept stream: %w", err))
 			return
 		}
 
 		if err := s.SetReadDeadline(time.Now().Add(readProtocolIDTimeout)); err != nil {
-			a.Cancel(fmt.Errorf("failed to set read deadline before reading protocol ID: %w", err))
+			a.cancel(fmt.Errorf("failed to set read deadline before reading protocol ID: %w", err))
 			return
 		}
 		var protocolID [1]byte
 		if _, err := io.ReadFull(s, protocolID[:]); err != nil {
-			a.Cancel(fmt.Errorf("failed to read protocol ID from full stream: %w", err))
+			a.cancel(fmt.Errorf("failed to read protocol ID from full stream: %w", err))
 			return
 		}
 
@@ -88,7 +124,7 @@ func (a *streamAccepter) AcceptStreams(
 
 		// Otherwise, pass the stream to the application.
 		as := AcceptedStream{
-			Conn:       a.Conn,
+			Conn:       a.conn,
 			Stream:     s,
 			ProtocolID: protocolID[0],
 		}
@@ -101,7 +137,7 @@ func (a *streamAccepter) AcceptStreams(
 	}
 }
 
-func (a *streamAccepter) handleBreathcastStream(
+func (a *StreamAccepter) handleBreathcastStream(
 	ctx context.Context,
 	s quic.Stream,
 ) {
@@ -109,7 +145,7 @@ func (a *streamAccepter) handleBreathcastStream(
 	// Still working from the earlier read deadline before parsing the ID.
 	bid, err := a.b.BCA.ExtractStreamBroadcastID(s, nil)
 	if err != nil {
-		a.Cancel(fmt.Errorf(
+		a.cancel(fmt.Errorf(
 			"failed to extract stream broadcast ID: %w", err,
 		))
 		return
@@ -117,7 +153,7 @@ func (a *streamAccepter) handleBreathcastStream(
 
 	ah, _, err := breathcast.ExtractStreamApplicationHeader(s, nil)
 	if err != nil {
-		a.Cancel(fmt.Errorf(
+		a.cancel(fmt.Errorf(
 			"failed to extract stream application header: %w", err,
 		))
 		return
@@ -125,8 +161,8 @@ func (a *streamAccepter) handleBreathcastStream(
 
 	// Now that we've extracted the broadcast ID and application header,
 	// we can run the quick check via the network adapter.
-	respCh := make(chan breathcastCheckResult, 1)
-	check := breathcastCheck{
+	respCh := make(chan BreathcastCheckResult, 1)
+	check := BreathcastCheck{
 		BroadcastID: bid,
 		AppHeader:   ah,
 
@@ -135,7 +171,7 @@ func (a *streamAccepter) handleBreathcastStream(
 	select {
 	case <-ctx.Done():
 		// Probably unnecessary to cancel, but won't hurt.
-		a.Cancel(fmt.Errorf(
+		a.cancel(fmt.Errorf(
 			"context canceled while doing breathcast check: %w", context.Cause(ctx),
 		))
 		return
@@ -143,11 +179,11 @@ func (a *streamAccepter) handleBreathcastStream(
 		// Okay.
 	}
 
-	var result breathcastCheckResult
+	var result BreathcastCheckResult
 	select {
 	case <-ctx.Done():
 		// Probably unnecessary to cancel, but won't hurt.
-		a.Cancel(fmt.Errorf(
+		a.cancel(fmt.Errorf(
 			"context canceled while awaiting breathcast check result: %w", context.Cause(ctx),
 		))
 		return
@@ -156,16 +192,16 @@ func (a *streamAccepter) handleBreathcastStream(
 	}
 
 	switch result {
-	case breathcastCheckRejected:
+	case BreathcastCheckRejected:
 		// Just cancel the worker for now.
-		a.Cancel(errors.New(
+		a.cancel(errors.New(
 			"rejected by network adapter",
 		))
 		return
-	case breathcastCheckAccepted:
+	case BreathcastCheckAccepted:
 		// The NetworkAdapter handled the stream, so we are done in this handler.
 		return
-	case breathcastCheckNeedsProcessed:
+	case BreathcastCheckNeedsProcessed:
 		// Continue past the switch.
 		break
 	default:
@@ -177,7 +213,7 @@ func (a *streamAccepter) handleBreathcastStream(
 	// The application header was the fully serialized proposed header.
 	var ph tmconsensus.ProposedHeader
 	if err := a.b.Unmarshaler.UnmarshalProposedHeader(ah, &ph); err != nil {
-		a.Cancel(fmt.Errorf(
+		a.cancel(fmt.Errorf(
 			"failed to parse proposed header from application header: %w", err,
 		))
 		return
@@ -195,14 +231,14 @@ func (a *streamAccepter) handleBreathcastStream(
 	// or pass it to the mirror to decide whether a new session is warranted.
 }
 
-func (a *streamAccepter) AcceptUniStreams(
+func (a *StreamAccepter) AcceptUniStreams(
 	ctx context.Context,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
 
 	for {
-		s, err := a.Conn.QUIC.AcceptUniStream(ctx)
+		s, err := a.conn.QUIC.AcceptUniStream(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				// Assume context cancellation was the cause of the failed accept.
@@ -211,17 +247,17 @@ func (a *streamAccepter) AcceptUniStreams(
 				return
 			}
 
-			a.Cancel(fmt.Errorf("failed to accept uni stream: %w", err))
+			a.cancel(fmt.Errorf("failed to accept uni stream: %w", err))
 			return
 		}
 
 		if err := s.SetReadDeadline(time.Now().Add(readProtocolIDTimeout)); err != nil {
-			a.Cancel(fmt.Errorf("failed to set read deadline before reading protocol ID: %w", err))
+			a.cancel(fmt.Errorf("failed to set read deadline before reading protocol ID: %w", err))
 			return
 		}
 		var protocolID [1]byte
 		if _, err := io.ReadFull(s, protocolID[:]); err != nil {
-			a.Cancel(fmt.Errorf("failed to read protocol ID from uni stream: %w", err))
+			a.cancel(fmt.Errorf("failed to read protocol ID from uni stream: %w", err))
 			return
 		}
 
@@ -232,7 +268,7 @@ func (a *streamAccepter) AcceptUniStreams(
 
 		// Otherwise, pass the stream to the application.
 		as := AcceptedUniStream{
-			Conn:       a.Conn,
+			Conn:       a.conn,
 			Stream:     s,
 			ProtocolID: protocolID[0],
 		}
@@ -245,7 +281,7 @@ func (a *streamAccepter) AcceptUniStreams(
 	}
 }
 
-func (a *streamAccepter) handleWingspanStream(
+func (a *StreamAccepter) handleWingspanStream(
 	ctx context.Context,
 	s quic.ReceiveStream,
 ) {

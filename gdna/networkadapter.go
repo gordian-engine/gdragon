@@ -13,12 +13,12 @@ import (
 	"github.com/gordian-engine/dragon/dpubsub"
 	"github.com/gordian-engine/dragon/wingspan"
 	"github.com/gordian-engine/gdragon/gdbc"
+	"github.com/gordian-engine/gdragon/gdna/internal/gdnai"
 	"github.com/gordian-engine/gdragon/gdwsu"
 	"github.com/gordian-engine/gordian/gcrypto"
 	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
-	"github.com/quic-go/quic-go"
 )
 
 // OriginationDetails is the struct that the driver or application must provide
@@ -63,57 +63,19 @@ type NetworkAdapter struct {
 
 	cc *dpubsub.Stream[dconn.Change]
 
-	sab streamAccepterBase
+	sab gdnai.StreamAccepterBase
 
 	wg   sync.WaitGroup
 	done chan struct{}
 }
 
-// AcceptedStream is a value used for the accepted stream channel
-// provided to [NetworkAdapterConfig], for the application to consume.
-type AcceptedStream struct {
-	Conn   dconn.Conn
-	Stream quic.Stream
+// AcceptedStream is the type representing
+// a bidirectional stream accepted by the [NetworkAdapter].
+type AcceptedStream = gdnai.AcceptedStream
 
-	ProtocolID byte
-}
-
-// AcceptedUniStream is a value used for the accepted unidirectional stream channel
-// provided to [NetworkAdapterConfig], for the application to consume.
-type AcceptedUniStream struct {
-	Conn   dconn.Conn
-	Stream quic.ReceiveStream
-
-	ProtocolID byte
-}
-
-// breathcastCheck is the value sent from the [streamAccepter]
-// to the [NetworkAdapter], for a fast check on whether a broadcast
-// matches an existing session or whether it needs to be fully parsed.
-type breathcastCheck struct {
-	BroadcastID, AppHeader []byte
-
-	CheckResult chan breathcastCheckResult
-}
-
-// breathcastCheckResult is the result value for [breathcastCheck]
-// sent from the [NetworkAdapter] to the [streamAccepter].
-type breathcastCheckResult uint8
-
-const (
-	// TODO: probably need more granular reject states.
-	// One to indicate "too old" but otherwise valid,
-	// another for something like malformed, maybe?
-	breathcastCheckRejected breathcastCheckResult = iota
-
-	// Accepted by the NetworkAdapter;
-	// no further work needed in the streamAccepter.
-	breathcastCheckAccepted
-
-	// Unrecognized by the NetworkAdapter but possibly valid.
-	// The streamAccepter needs to fully process the value.
-	breathcastCheckNeedsProcessed
-)
+// AcceptedUniStream is the type representing
+// a unidirectional stream accepted by the [NetworkAdapter].
+type AcceptedUniStream = gdnai.AcceptedUniStream
 
 // NetworkAdapterConfig is the configuration value for [NewNetworkAdapter].
 type NetworkAdapterConfig struct {
@@ -189,7 +151,7 @@ func NewNetworkAdapter(
 		// 1-buffered so the Start call doesn't block.
 		startCh: make(chan (<-chan tmelink.NetworkViewUpdate), 1),
 
-		sab: streamAccepterBase{
+		sab: gdnai.StreamAccepterBase{
 			AcceptedStreamCh:    cfg.AcceptedStreamCh,
 			AcceptedUniStreamCh: cfg.AcceptedUniStreamCh,
 
@@ -237,7 +199,7 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 	}
 
 	// Set up stream accepters on the initial connections.
-	accepters := make(map[dcert.LeafCertHandle]*streamAccepter, len(initialConns))
+	accepters := make(map[dcert.LeafCertHandle]*gdnai.StreamAccepter, len(initialConns))
 	for _, conn := range initialConns {
 		s.addStreamAccepter(ctx, accepters, conn)
 	}
@@ -258,21 +220,16 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 	}
 }
 
-// addStreamAccepter creates a new streamAccepter instance
+// addStreamAccepter creates a new StreamAccepter instance
 // for the given connection, and runs its background goroutines.
 func (s *NetworkAdapter) addStreamAccepter(
 	ctx context.Context,
-	accepters map[dcert.LeafCertHandle]*streamAccepter,
+	accepters map[dcert.LeafCertHandle]*gdnai.StreamAccepter,
 	conn dconn.Conn,
 ) {
 	connCtx, cancel := context.WithCancelCause(ctx)
 
-	sa := &streamAccepter{
-		Conn:   conn,
-		Cancel: cancel,
-
-		b: &s.sab,
-	}
+	sa := gdnai.NewStreamAccepter(conn, cancel, &s.sab)
 
 	s.wg.Add(2)
 	go sa.AcceptStreams(connCtx, &s.wg)
@@ -494,7 +451,7 @@ func (s *NetworkAdapter) initiateBroadcasts(
 // handleConnectionChange handles a new value on s.cc (the ConnChange pubsub stream).
 func (s *NetworkAdapter) handleConnectionChange(
 	ctx context.Context,
-	accepters map[dcert.LeafCertHandle]*streamAccepter,
+	accepters map[dcert.LeafCertHandle]*gdnai.StreamAccepter,
 ) {
 	cc := s.cc.Val
 	s.cc = s.cc.Next
