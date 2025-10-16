@@ -2,10 +2,16 @@ package gdna_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 
+	"github.com/gordian-engine/gdragon/gdbc"
+	"github.com/gordian-engine/gdragon/gdna"
 	"github.com/gordian-engine/gdragon/gdna/gdnatest"
+	"github.com/gordian-engine/gordian/tm/tmconsensus"
+	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,4 +73,106 @@ func TestNetworkAdapter_applicationProtocolsExposed(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "uni", string(uniBuf))
 	})
+}
+
+func TestNetworkAdapter_proposedBlock(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	const nNodes = 3
+
+	// This time we do need network view update channels for each node.
+	nvuChs := make([]chan tmelink.NetworkViewUpdate, nNodes)
+	for i := range nvuChs {
+		// Must be unbuffered so we confirm receipt on send.
+		nvuChs[i] = make(chan tmelink.NetworkViewUpdate)
+	}
+
+	chBufs := make([]gdnatest.CHBuffer, nNodes)
+	for i := range chBufs {
+		chBufs[i] = gdnatest.NewCHBuffer(4)
+	}
+
+	nfx := gdnatest.NewFixture(t, ctx, nNodes)
+	for i := range nNodes {
+		nfx.NetworkAdapters[i].SetConsensusHandler(chBufs[i])
+		nfx.NetworkAdapters[i].Start(nvuChs[i])
+	}
+
+	nw := nfx.Network
+	require.NoError(t, nw.Nodes[0].Node.DialAndJoin(ctx, nw.Nodes[1].UDP.LocalAddr()))
+	require.NoError(t, nw.Nodes[1].Node.DialAndJoin(ctx, nw.Nodes[2].UDP.LocalAddr()))
+
+	// First, tell nodes 1 and 2 that we are at initial height.
+	// Normally this would also include the next round view,
+	// but it should be fine to omit that in test here.
+	u := tmelink.NetworkViewUpdate{
+		Voting: &tmconsensus.VersionedRoundView{
+			RoundView: tmconsensus.RoundView{
+				Height: 1, Round: 0,
+
+				ValidatorSet: nfx.Fx.ValSet(),
+			},
+		},
+		RoundSessionChanges: []tmelink.RoundSessionChange{
+			{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
+		},
+	}
+	nvuChs[1] <- u
+	nvuChs[2] <- u
+
+	// Now, node 0 is going to make a proposed block.
+	ph := nfx.Fx.NextProposedHeader([]byte("dataid0"), 0)
+
+	// Make some random enough data for the block.
+	blockData := []byte(strings.Repeat("abcdefghijklmnopqrstuv", 1024))
+
+	// The node has to prepare an origination through the breathcast adapter.
+	nonce := []byte{1, 2, 4, 8, 16} // Arbitrary nonce for origination.
+	po, err := nfx.GDBCAdapters[0].PrepareOrigination(gdbc.PrepareOriginationConfig{
+		BlockData: blockData,
+
+		ParityRatio: 0.1,
+
+		HashNonce: nonce,
+
+		Height: 1, Round: 0,
+		ProposerIdx: 0,
+	})
+	require.NoError(t, err)
+
+	ph.Annotations.Driver, err = json.Marshal(po.BroadcastDetails())
+	require.NoError(t, err)
+
+	nfx.Fx.SignProposal(ctx, &ph, 0)
+
+	phBytes, err := nfx.MarshalCodec.MarshalProposedHeader(ph)
+	require.NoError(t, err)
+
+	od := gdna.OriginationDetails{
+		AppHeader:           phBytes,
+		PreparedOrigination: po,
+	}
+
+	nfx.RegisterOriginationDetails(ph.Header.Hash, od)
+
+	t.Skip("TODO: finish plumbing broadcast")
+
+	// Make a separate update for the proposer,
+	// to avoid possible memory conflict.
+	vClone := u.Voting.Clone()
+	vClone.ProposedHeaders = []tmconsensus.ProposedHeader{ph}
+	u = tmelink.NetworkViewUpdate{
+		Voting: &vClone,
+		RoundSessionChanges: []tmelink.RoundSessionChange{
+			{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
+		},
+	}
+	nvuChs[0] <- u
+
+	// If the origination worked, the data should be ready ~immediately on the proposer.
+	gotPH := <-chBufs[1].ProposedHeaders
+	require.NotNil(t, gotPH)
 }

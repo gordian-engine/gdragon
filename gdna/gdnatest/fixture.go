@@ -3,6 +3,8 @@ package gdnatest
 import (
 	"context"
 	"crypto/ed25519"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/gordian-engine/dragon/breathcast"
@@ -16,6 +18,7 @@ import (
 	"github.com/gordian-engine/gdragon/gdna"
 	"github.com/gordian-engine/gdragon/gdwsu"
 	"github.com/gordian-engine/gordian/gcrypto"
+	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmcodec/tmjson"
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
 	"github.com/stretchr/testify/require"
@@ -66,6 +69,11 @@ type Fixture struct {
 	]
 
 	NetworkAdapters []*gdna.NetworkAdapter
+
+	MarshalCodec tmcodec.MarshalCodec
+
+	odMu sync.Mutex
+	ods  map[string]gdna.OriginationDetails
 }
 
 // NewFixture returns a new Fixture.
@@ -142,9 +150,13 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 
 	// Finally we should have everything needed to make a network adapter.
 
-	// A single unmarshaler can be shared among all the network adapters.
-	unmarshaler := tmjson.MarshalCodec{CryptoRegistry: new(gcrypto.Registry)}
-	gcrypto.RegisterEd25519(unmarshaler.CryptoRegistry)
+	// A single codec can be shared among all the network adapters.
+	codec := tmjson.MarshalCodec{CryptoRegistry: new(gcrypto.Registry)}
+	gcrypto.RegisterEd25519(codec.CryptoRegistry)
+
+	// And we need one set of hte
+	var odMu sync.Mutex
+	ods := map[string]gdna.OriginationDetails{}
 
 	networkAdapters := make([]*gdna.NetworkAdapter, nNodes)
 
@@ -169,6 +181,9 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 
 				Wingspan: wingspanProtocols[i],
 
+				BreathcastProtocolID: BreathcastProtocolID,
+				WingspanProtocolID: WingspanProtocolID,
+
 				OwnPubKey: fx.ValidatorPubKey(i),
 
 				SignatureScheme: tmconsensustest.SimpleSignatureScheme{},
@@ -177,13 +192,24 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 				HashLen:      32, // TODO: this needs to be a constant from tmconsensustest.
 
 				GetOriginationDetailsFunc: func(blockHash []byte) gdna.OriginationDetails {
-					panic("TODO")
+					odMu.Lock()
+					defer odMu.Unlock()
+
+					od, ok := ods[string(blockHash)]
+					if !ok {
+						panic(fmt.Errorf(
+							"attempted to get origination details for hash %x, but no entry existed",
+							blockHash,
+						))
+					}
+
+					return od
 				},
 
 				AcceptedStreamCh:    asCh,
 				AcceptedUniStreamCh: ausCh,
 
-				Unmarshaler: unmarshaler,
+				Unmarshaler: codec,
 			},
 		)
 		t.Cleanup(networkAdapters[i].Wait)
@@ -205,5 +231,16 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 		WingspanProtocols: wingspanProtocols,
 
 		NetworkAdapters: networkAdapters,
+
+		MarshalCodec: codec,
+
+		ods: ods,
 	}
+}
+
+func (f *Fixture) RegisterOriginationDetails(blockHash []byte, od gdna.OriginationDetails) {
+	f.odMu.Lock()
+	defer f.odMu.Unlock()
+
+	f.ods[string(blockHash)] = od
 }

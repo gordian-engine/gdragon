@@ -61,6 +61,8 @@ type NetworkAdapter struct {
 
 	startCh chan (<-chan tmelink.NetworkViewUpdate)
 
+	bcChecks chan gdnai.BreathcastCheck
+
 	cc *dpubsub.Stream[dconn.Change]
 
 	sab gdnai.StreamAccepterBase
@@ -91,6 +93,9 @@ type NetworkAdapterConfig struct {
 		gdwsu.ParsedPacket, gdwsu.OutboundPacket,
 		gdwsu.ReceivedFromPeer, gdwsu.UpdateFromCentral,
 	]
+
+	// Needed for internal routing of QUIC streams.
+	BreathcastProtocolID, WingspanProtocolID byte
 
 	// If validating, the validator's public key.
 	// This is used to determine whether a reported proposed header
@@ -134,6 +139,10 @@ func NewNetworkAdapter(
 	log *slog.Logger,
 	cfg NetworkAdapterConfig,
 ) *NetworkAdapter {
+
+	// Unbuffered seems correct for this.
+	breathcastChecks := make(chan gdnai.BreathcastCheck)
+
 	s := &NetworkAdapter{
 		log: log,
 
@@ -151,15 +160,22 @@ func NewNetworkAdapter(
 		// 1-buffered so the Start call doesn't block.
 		startCh: make(chan (<-chan tmelink.NetworkViewUpdate), 1),
 
+		bcChecks: breathcastChecks,
+
 		cc: cfg.ConnectionChanges,
 
 		sab: gdnai.StreamAccepterBase{
 			AcceptedStreamCh:    cfg.AcceptedStreamCh,
 			AcceptedUniStreamCh: cfg.AcceptedUniStreamCh,
 
+			BreathcastChecks: breathcastChecks,
+
 			Unmarshaler: cfg.Unmarshaler,
 
 			BCA: cfg.BreathcastAdapter,
+
+			BCID: cfg.BreathcastProtocolID,
+			WSID: cfg.WingspanProtocolID,
 		},
 
 		done: make(chan struct{}),
@@ -218,6 +234,15 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 
 		case <-s.cc.Ready:
 			s.handleConnectionChange(ctx, accepters)
+
+		case c := <-s.bcChecks:
+			res := s.handleBreathcastCheck(ctx, liveSessions, c)
+			select {
+			case <-ctx.Done():
+				return
+			case c.CheckResult <- res:
+				// Okay.
+			}
 		}
 	}
 }
@@ -325,6 +350,11 @@ func (s *NetworkAdapter) handleActivatedSession(
 			voteState, voteDeltas,
 		)
 		if err != nil {
+			if ctx.Err() != nil {
+				// Shutting down due to context cancellation.
+				cancel() // Free vote context anyway.
+				return
+			}
 			panic(fmt.Errorf(
 				"TODO: handle error from new voting session: %w", err,
 			))
@@ -438,6 +468,11 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	bopCtx, cancel := context.WithCancel(ctx)
 	bop, err := s.bc.Originate(bopCtx, d.AppHeader, d.PreparedOrigination)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Context cancellation, so just quit.
+			cancel() // Free bopCtx resources anyway.
+			return
+		}
 		panic(fmt.Errorf(
 			"TODO: handle error in origination: %w", err,
 		))
@@ -486,4 +521,16 @@ func (s *NetworkAdapter) handleConnectionChange(
 	}
 
 	s.addStreamAccepter(ctx, accepters, cc.Conn)
+}
+
+// handleBreathcastCheck handles a check from a [gdnai.StreamAccepter].
+// If the check matches an existing live session,
+// the underlying stream is associated with the corresponding operation.
+func (s *NetworkAdapter) handleBreathcastCheck(
+	ctx context.Context,
+	liveSessions sessionSet,
+	c gdnai.BreathcastCheck,
+) gdnai.BreathcastCheckResult {
+	// TODO: actually compare against real sessions.
+	return gdnai.BreathcastCheckNeedsProcessed
 }

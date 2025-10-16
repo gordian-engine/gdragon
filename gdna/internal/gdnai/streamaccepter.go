@@ -43,7 +43,7 @@ type StreamAccepterBase struct {
 
 	// The streamAccepter instances send on this channel,
 	// and the NetworkAdapter receives on it.
-	BreathcastCheck chan BreathcastCheck
+	BreathcastChecks chan BreathcastCheck
 
 	Unmarshaler tmcodec.Unmarshaler
 
@@ -175,7 +175,7 @@ func (a *StreamAccepter) handleBreathcastStream(
 			"context canceled while doing breathcast check: %w", context.Cause(ctx),
 		))
 		return
-	case a.b.BreathcastCheck <- check:
+	case a.b.BreathcastChecks <- check:
 		// Okay.
 	}
 
@@ -285,5 +285,6 @@ func (a *StreamAccepter) handleWingspanStream(
 	ctx context.Context,
 	s quic.ReceiveStream,
 ) {
-	panic("TODO")
+	// TODO: these streams are created immediately upon round activation,
+	// so we need to create and manage the stream here even if tests are exercising them yet.
 }
