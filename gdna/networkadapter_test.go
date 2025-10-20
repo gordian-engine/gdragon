@@ -156,9 +156,8 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 		PreparedOrigination: po,
 	}
 
+	// This is for the outgoing broadcast only.
 	nfx.RegisterOriginationDetails(ph.Header.Hash, od)
-
-	t.Skip("TODO: finish plumbing broadcast")
 
 	// Make a separate update for the proposer,
 	// to avoid possible memory conflict.
@@ -172,7 +171,14 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	}
 	nvuChs[0] <- u
 
-	// If the origination worked, the data should be ready ~immediately on the proposer.
+	// If the origination worked, the proposed header should be available
+	// quickly on the first receiver's consensus handler.
 	gotPH := <-chBufs[1].ProposedHeaders
-	require.NotNil(t, gotPH)
+	require.Equal(t, ph, gotPH)
+
+	t.Skip("TODO: gdna doesn't hop broadcasting yet")
+
+	// And it should be ready very quickly on the other nodes too.
+	gotPH = <-chBufs[2].ProposedHeaders
+	require.Equal(t, ph, gotPH)
 }

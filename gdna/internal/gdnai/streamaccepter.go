@@ -41,11 +41,17 @@ type StreamAccepterBase struct {
 	AcceptedStreamCh    chan<- AcceptedStream
 	AcceptedUniStreamCh chan<- AcceptedUniStream
 
+	IncomingHeaders chan<- IncomingHeader
+
 	// The streamAccepter instances send on this channel,
 	// and the NetworkAdapter receives on it.
 	BreathcastChecks chan BreathcastCheck
 
 	Unmarshaler tmcodec.Unmarshaler
+
+	// How to extract the broadcast details from the proposed header's
+	// annotations set by the driver.
+	GetBroadcastDetails func(driverAnnotation []byte) (gdbc.BroadcastDetails, error)
 
 	BCA *gdbc.Adapter
 
@@ -219,16 +225,50 @@ func (a *StreamAccepter) handleBreathcastStream(
 		return
 	}
 
-	// TODO: how do we extract the OriginationDetails from the proposed header?
+	bd, err := a.b.GetBroadcastDetails(ph.Annotations.Driver)
+	if err != nil {
+		a.cancel(fmt.Errorf(
+			"failed to extract broadcast details from driver annotations: %w", err,
+		))
+		return
+	}
 
-	panic(errors.New(
-		"TODO: finish parsing proposed header and send back to NetworkAdapter",
-	))
+	// Fully parsed, so send it back to the core network adapter.
+	ih := IncomingHeader{
+		Conn:             a.conn,
+		Stream:           s,
+		BroadcastID:      bid,
+		ProposedHeader:   ph,
+		BroadcastDetails: bd,
+	}
 
-	// TODO: pass some details back to the adapter,
-	// which will inspect the live sessions
-	// and then add this stream to an existing session
-	// or pass it to the mirror to decide whether a new session is warranted.
+	select {
+	case <-ctx.Done():
+		a.cancel(fmt.Errorf(
+			"context canceled while sending incoming header: %w", context.Cause(ctx),
+		))
+		return
+	case a.b.IncomingHeaders <- ih:
+		// Okay.
+	}
+
+	// Once handed off to the network adapter,
+	// the stream accepter no longer owns the stream.
+}
+
+// IncomingHeader is the type sent from the [StreamAccepter]
+// back to the NetworkAdapter,
+// after a [BreathcastCheck] indicated it needed further processing.
+type IncomingHeader struct {
+	Conn   dconn.Conn
+	Stream quic.Stream
+
+	BroadcastID []byte
+
+	AppHeaderBytes []byte
+	ProposedHeader tmconsensus.ProposedHeader
+
+	BroadcastDetails gdbc.BroadcastDetails
 }
 
 func (a *StreamAccepter) AcceptUniStreams(

@@ -3,6 +3,7 @@ package gdnatest
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -182,7 +183,7 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 				Wingspan: wingspanProtocols[i],
 
 				BreathcastProtocolID: BreathcastProtocolID,
-				WingspanProtocolID: WingspanProtocolID,
+				WingspanProtocolID:   WingspanProtocolID,
 
 				OwnPubKey: fx.ValidatorPubKey(i),
 
@@ -204,6 +205,18 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 					}
 
 					return od
+				},
+
+				GetBroadcastDetailsFunc: func(proposalDriverAnnotation []byte) (gdbc.BroadcastDetails, error) {
+					// Assuming for now that the proposal annotation is a simple JSON encoding.
+					var d gdbc.BroadcastDetails
+					if err := json.Unmarshal(proposalDriverAnnotation, &d); err != nil {
+						return d, fmt.Errorf(
+							"failed to json-unmarshal broadcast details: %w", err,
+						)
+					}
+
+					return d, nil
 				},
 
 				AcceptedStreamCh:    asCh,

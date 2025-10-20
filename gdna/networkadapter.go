@@ -16,6 +16,7 @@ import (
 	"github.com/gordian-engine/gdragon/gdna/internal/gdnai"
 	"github.com/gordian-engine/gdragon/gdwsu"
 	"github.com/gordian-engine/gordian/gcrypto"
+	"github.com/gordian-engine/gordian/gexchange"
 	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
@@ -62,6 +63,8 @@ type NetworkAdapter struct {
 	startCh chan (<-chan tmelink.NetworkViewUpdate)
 
 	bcChecks chan gdnai.BreathcastCheck
+
+	incomingHeaders chan gdnai.IncomingHeader
 
 	cc *dpubsub.Stream[dconn.Change]
 
@@ -119,6 +122,10 @@ type NetworkAdapterConfig struct {
 	// proposed by the current validator is fatal.
 	GetOriginationDetailsFunc func(blockHash []byte) OriginationDetails
 
+	// How to get the broadcast details when decoding a proposed header.
+	// Necessary for the receiving side of a breathcast-distributed block.
+	GetBroadcastDetailsFunc func(proposalDriverAnnotations []byte) (gdbc.BroadcastDetails, error)
+
 	// The [NetworkAdapter] starts goroutines per connection to accept streams.
 	// If the stream has a protocol ID that does not match a protocol owned by the adapter,
 	// that stream is sent on one of these two channels.
@@ -142,6 +149,7 @@ func NewNetworkAdapter(
 
 	// Unbuffered seems correct for this.
 	breathcastChecks := make(chan gdnai.BreathcastCheck)
+	incomingHeaders := make(chan gdnai.IncomingHeader)
 
 	s := &NetworkAdapter{
 		log: log,
@@ -162,15 +170,20 @@ func NewNetworkAdapter(
 
 		bcChecks: breathcastChecks,
 
+		incomingHeaders: incomingHeaders,
+
 		cc: cfg.ConnectionChanges,
 
 		sab: gdnai.StreamAccepterBase{
 			AcceptedStreamCh:    cfg.AcceptedStreamCh,
 			AcceptedUniStreamCh: cfg.AcceptedUniStreamCh,
+			IncomingHeaders:     incomingHeaders,
 
 			BreathcastChecks: breathcastChecks,
 
 			Unmarshaler: cfg.Unmarshaler,
+
+			GetBroadcastDetails: cfg.GetBroadcastDetailsFunc,
 
 			BCA: cfg.BreathcastAdapter,
 
@@ -243,6 +256,9 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 			case c.CheckResult <- res:
 				// Okay.
 			}
+
+		case ih := <-s.incomingHeaders:
+			s.handleIncomingHeader(ctx, liveSessions, ih)
 		}
 	}
 }
@@ -533,4 +549,97 @@ func (s *NetworkAdapter) handleBreathcastCheck(
 ) gdnai.BreathcastCheckResult {
 	// TODO: actually compare against real sessions.
 	return gdnai.BreathcastCheckNeedsProcessed
+}
+
+func (s *NetworkAdapter) handleIncomingHeader(
+	ctx context.Context,
+	liveSessions sessionSet,
+	ih gdnai.IncomingHeader,
+) {
+	// First, do we have a matching session?
+	sessKey := hr{
+		H: binary.BigEndian.Uint64(ih.BroadcastID),
+		R: binary.BigEndian.Uint32(ih.BroadcastID[8:]),
+	}
+
+	sess, ok := liveSessions[sessKey]
+	if !ok {
+		panic("TODO: consult consensus handler for missing session")
+	}
+
+	// We have a matching session, so first we have to check if we raced on this particular header.
+	if cb, ok := sess.Headers[string(ih.ProposedHeader.Header.Hash)]; ok {
+		// It was a race.
+		// We can just pass the stream directly to the operation.
+		if err := cb.Op.AcceptBroadcast(ctx, ih.Conn, ih.Stream); err != nil {
+			panic(fmt.Errorf(
+				"TODO: handle error when accepting broadcast: %w", err,
+			))
+		}
+		return
+	}
+
+	// First time we've seen this header.
+	// So, it's up to the mirror (the consensus handler, actually) whether we accept it.
+	f := s.h.HandleProposedHeader(ctx, ih.ProposedHeader)
+	switch f {
+	case gexchange.FeedbackAccepted:
+		// This is the case we are hoping for.
+		// Process it outside the switch.
+		break
+
+	case gexchange.FeedbackRejected:
+		// TODO: we don't yet have a way to "penalize" the sender in Dragon,
+		// which we are supposed to do in the reject case.
+		// So for now just close the stream.
+		ih.Stream.CancelWrite(ProposedHeaderRejected)
+		_ = ih.Stream.Close()
+		return
+
+	case gexchange.FeedbackIgnored:
+		// Just close the connection without penalizing the source.
+		ih.Stream.CancelWrite(ProposedHeaderIgnored)
+		_ = ih.Stream.Close()
+		return
+
+	case gexchange.FeedbackRejectAndDisconnect:
+		// The sender did something egregious,
+		// so we close the entire connection.
+		_ = ih.Conn.QUIC.CloseWithError(DisconnectDueToProposedHeader, "rejected proposed header")
+		return
+
+	default:
+		panic(fmt.Errorf(
+			"BUG: unhandled feedback value %s when handling proposed header", f,
+		))
+	}
+
+	// Now we can make a broadcast operation.
+	bCtx, cancel := context.WithCancel(ctx)
+	bop, err := s.bc.NewIncomingBroadcast(bCtx, gdbc.IncomingBroadcastConfig{
+		BroadcastID: ih.BroadcastID,
+		AppHeader:   ih.AppHeaderBytes,
+
+		BroadcastDetails: ih.BroadcastDetails,
+	})
+	if err != nil {
+		ih.Stream.CancelWrite(InternalBroadcastOperationFailure)
+		_ = ih.Stream.Close()
+		cancel()
+		return
+	}
+
+	// Store the session.
+	sess.Headers[string(ih.ProposedHeader.Header.Hash)] = cancelableBroadcast{
+		Op:     bop,
+		Cancel: cancel,
+	}
+
+	// And finally add the incoming stream to that session.
+	if err := bop.AcceptBroadcast(bCtx, ih.Conn, ih.Stream); err != nil {
+		ih.Stream.CancelWrite(InternalBroadcastOperationFailure)
+		_ = ih.Stream.Close()
+		cancel()
+		return
+	}
 }
