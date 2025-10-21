@@ -22,6 +22,7 @@ import (
 	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmcodec/tmjson"
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
+	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,6 +50,11 @@ type Fixture struct {
 	// Indexed one-to-one with network nodes and network adapters.
 	AcceptedStreamChs    []<-chan gdna.AcceptedStream
 	AcceptedUniStreamChs []<-chan gdna.AcceptedUniStream
+
+	// The set of channels that would normally be supplied to the engine
+	// via the WithBlockDataArrivalChannel function.
+	// Exposed directly here for consumption in test.
+	BlockDataArrivalChs []<-chan tmelink.BlockDataArrival
 
 	// The connection change streams used for the protocol instances
 	// and supporting types.
@@ -163,14 +169,17 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 
 	acceptedStreamChs := make([]<-chan gdna.AcceptedStream, nNodes)
 	acceptedUniStreamChs := make([]<-chan gdna.AcceptedUniStream, nNodes)
+	blockDataArrivalChs := make([]<-chan tmelink.BlockDataArrival, nNodes)
 
 	for i := range networkAdapters {
 		// Arbitrary guess of size 8.
 		asCh := make(chan gdna.AcceptedStream, 8)
 		ausCh := make(chan gdna.AcceptedUniStream, 8)
+		bdaCh := make(chan tmelink.BlockDataArrival, 8)
 
 		acceptedStreamChs[i] = asCh
 		acceptedUniStreamChs[i] = ausCh
+		blockDataArrivalChs[i] = bdaCh
 
 		networkAdapters[i] = gdna.NewNetworkAdapter(
 			ctx, nw.Log.With("networkadapter", i),
@@ -221,6 +230,7 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 
 				AcceptedStreamCh:    asCh,
 				AcceptedUniStreamCh: ausCh,
+				BlockDataArrivalCh:  bdaCh,
 
 				Unmarshaler: codec,
 			},
@@ -235,6 +245,7 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 
 		AcceptedStreamChs:    acceptedStreamChs,
 		AcceptedUniStreamChs: acceptedUniStreamChs,
+		BlockDataArrivalChs:  blockDataArrivalChs,
 
 		ConnChangeStreams: connChangeStreams,
 

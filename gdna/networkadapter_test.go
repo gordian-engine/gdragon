@@ -124,7 +124,8 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	nvuChs[2] <- u
 
 	// Now, node 0 is going to make a proposed block.
-	ph := nfx.Fx.NextProposedHeader([]byte("dataid0"), 0)
+	const dataID = "dataid0"
+	ph := nfx.Fx.NextProposedHeader([]byte(dataID), 0)
 
 	// Make some random enough data for the block.
 	blockData := []byte(strings.Repeat("abcdefghijklmnopqrstuv", 1024))
@@ -180,5 +181,17 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	gotPH = <-chBufs[2].ProposedHeaders
 	require.Equal(t, ph, gotPH)
 
-	t.Skip("TODO: confirm data ready on both other nodes")
+	// Block data is ready quickly on both receiving nodes.
+	expBDA := tmelink.BlockDataArrival{
+		Height: 1,
+		Round:  0,
+		ID:     dataID,
+	}
+	bda := <-nfx.BlockDataArrivalChs[0]
+	require.Equal(t, expBDA, bda)
+
+	t.Skip("TODO: debug transitive peer not notifying of block data arrival")
+
+	bda = <-nfx.BlockDataArrivalChs[1]
+	require.Equal(t, expBDA, bda)
 }

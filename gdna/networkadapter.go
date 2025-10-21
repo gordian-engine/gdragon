@@ -66,6 +66,8 @@ type NetworkAdapter struct {
 
 	incomingHeaders chan gdnai.IncomingHeader
 
+	blockDataArrivalCh chan<- tmelink.BlockDataArrival
+
 	cc *dpubsub.Stream[dconn.Change]
 
 	sab gdnai.StreamAccepterBase
@@ -136,6 +138,13 @@ type NetworkAdapterConfig struct {
 	AcceptedStreamCh    chan<- AcceptedStream
 	AcceptedUniStreamCh chan<- AcceptedUniStream
 
+	// The NetworkAdapter sends to this channel,
+	// and the core engine receives from it,
+	// to refresh the consensus strategy once the block data is readable.
+	//
+	// The appropriate buffer size for this channel will be application-dependent.
+	BlockDataArrivalCh chan<- tmelink.BlockDataArrival
+
 	// How to deserialize a proposed header from a breathcast application header.
 	Unmarshaler tmcodec.Unmarshaler
 }
@@ -171,6 +180,8 @@ func NewNetworkAdapter(
 		bcChecks: breathcastChecks,
 
 		incomingHeaders: incomingHeaders,
+
+		blockDataArrivalCh: cfg.BlockDataArrivalCh,
 
 		cc: cfg.ConnectionChanges,
 
@@ -498,6 +509,48 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	liveSessions[sKey].Headers[string(ph.Header.Hash)] = cancelableBroadcast{
 		Op:     bop,
 		Cancel: cancel,
+	}
+
+	// And link the operation's data to the block data arrival.
+	s.wg.Add(1)
+	go notifyBlockDataArrival(
+		bopCtx, &s.wg,
+		bop.DataReady(),
+		s.blockDataArrivalCh,
+		tmelink.BlockDataArrival{
+			Height: ph.Header.Height,
+			Round:  ph.Round,
+			ID:     string(ph.Header.DataID),
+		},
+	)
+}
+
+// notifyBlockDataArrival sends a notification on bdaCh
+// when the data is ready for a particular block.
+//
+// This is run in its own goroutine.
+func notifyBlockDataArrival(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	dataReady <-chan struct{},
+	bdaCh chan<- tmelink.BlockDataArrival,
+	bda tmelink.BlockDataArrival,
+) {
+	defer wg.Done()
+
+	// Wait for the data to be ready.
+	select {
+	case <-ctx.Done():
+		return
+	case <-dataReady:
+		// Okay to notify.
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case bdaCh <- bda:
+		// Done.
 	}
 }
 
