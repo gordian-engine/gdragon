@@ -238,6 +238,7 @@ func (a *StreamAccepter) handleBreathcastStream(
 		Conn:             a.conn,
 		Stream:           s,
 		BroadcastID:      bid,
+		AppHeaderBytes:   ah,
 		ProposedHeader:   ph,
 		BroadcastDetails: bd,
 	}

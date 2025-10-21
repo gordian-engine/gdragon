@@ -176,9 +176,9 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	gotPH := <-chBufs[1].ProposedHeaders
 	require.Equal(t, ph, gotPH)
 
-	t.Skip("TODO: gdna doesn't hop broadcasting yet")
-
 	// And it should be ready very quickly on the other nodes too.
 	gotPH = <-chBufs[2].ProposedHeaders
 	require.Equal(t, ph, gotPH)
+
+	t.Skip("TODO: confirm data ready on both other nodes")
 }
