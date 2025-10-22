@@ -41,7 +41,7 @@ func TestNetworkAdapter_applicationProtocolsExposed(t *testing.T) {
 
 	t.Run("bidirectional stream", func(t *testing.T) {
 		// Open a bidirectional stream from 0 to 1.
-		s01, err := cc0.Conn.QUIC.OpenStream()
+		s01, err := cc0.Conn.QUIC.OpenStreamSync(ctx)
 		require.NoError(t, err)
 
 		_, err = s01.Write([]byte("\xFFbidi"))
@@ -58,7 +58,7 @@ func TestNetworkAdapter_applicationProtocolsExposed(t *testing.T) {
 	})
 
 	t.Run("unidirectional stream", func(t *testing.T) {
-		s10, err := cc1.Conn.QUIC.OpenUniStream()
+		s10, err := cc1.Conn.QUIC.OpenUniStreamSync(ctx)
 		require.NoError(t, err)
 
 		_, err = s10.Write([]byte("\xFEuni"))

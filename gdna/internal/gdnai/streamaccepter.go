@@ -10,10 +10,10 @@ import (
 
 	"github.com/gordian-engine/dragon/breathcast"
 	"github.com/gordian-engine/dragon/dconn"
+	"github.com/gordian-engine/dragon/dquic"
 	"github.com/gordian-engine/gdragon/gdbc"
 	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
-	"github.com/quic-go/quic-go"
 )
 
 const readProtocolIDTimeout = 50 * time.Millisecond
@@ -22,7 +22,7 @@ const readProtocolIDTimeout = 50 * time.Millisecond
 // provided to [NetworkAdapterConfig], for the application to consume.
 type AcceptedStream struct {
 	Conn   dconn.Conn
-	Stream quic.Stream
+	Stream dquic.Stream
 
 	ProtocolID byte
 }
@@ -31,7 +31,7 @@ type AcceptedStream struct {
 // provided to [NetworkAdapterConfig], for the application to consume.
 type AcceptedUniStream struct {
 	Conn   dconn.Conn
-	Stream quic.ReceiveStream
+	Stream dquic.ReceiveStream
 
 	ProtocolID byte
 }
@@ -145,7 +145,7 @@ func (a *StreamAccepter) AcceptStreams(
 
 func (a *StreamAccepter) handleBreathcastStream(
 	ctx context.Context,
-	s quic.Stream,
+	s dquic.Stream,
 ) {
 	// We've parsed only the protocol ID so far.
 	// Still working from the earlier read deadline before parsing the ID.
@@ -262,7 +262,7 @@ func (a *StreamAccepter) handleBreathcastStream(
 // after a [BreathcastCheck] indicated it needed further processing.
 type IncomingHeader struct {
 	Conn   dconn.Conn
-	Stream quic.Stream
+	Stream dquic.Stream
 
 	BroadcastID []byte
 
@@ -324,7 +324,7 @@ func (a *StreamAccepter) AcceptUniStreams(
 
 func (a *StreamAccepter) handleWingspanStream(
 	ctx context.Context,
-	s quic.ReceiveStream,
+	s dquic.ReceiveStream,
 ) {
 	// TODO: these streams are created immediately upon round activation,
 	// so we need to create and manage the stream here even if tests are exercising them yet.

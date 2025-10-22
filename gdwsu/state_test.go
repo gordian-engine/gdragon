@@ -11,6 +11,7 @@ import (
 
 	"github.com/gordian-engine/dragon/dconn"
 	"github.com/gordian-engine/dragon/dpubsub"
+	"github.com/gordian-engine/dragon/dquic"
 	"github.com/gordian-engine/dragon/wingspan"
 	"github.com/gordian-engine/dragon/wingspan/wingspantest"
 	"github.com/gordian-engine/gdragon/gdwsu"
@@ -18,7 +19,6 @@ import (
 	"github.com/gordian-engine/gordian/gcrypto/gcryptotest"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
-	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -306,7 +306,7 @@ func TestSession_votes_hop(t *testing.T) {
 	s12, err := c21.AcceptUniStream(acceptCtx)
 	require.NoError(t, err)
 
-	streams := []quic.ReceiveStream{
+	streams := []dquic.ReceiveStream{
 		s01, s10, s12, s21,
 	}
 
