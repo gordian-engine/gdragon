@@ -190,8 +190,9 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	bda := <-nfx.BlockDataArrivalChs[0]
 	require.Equal(t, expBDA, bda)
 
-	t.Skip("TODO: debug transitive peer not notifying of block data arrival")
-
 	bda = <-nfx.BlockDataArrivalChs[1]
+	require.Equal(t, expBDA, bda)
+
+	bda = <-nfx.BlockDataArrivalChs[2]
 	require.Equal(t, expBDA, bda)
 }

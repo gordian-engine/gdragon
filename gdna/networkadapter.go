@@ -695,4 +695,16 @@ func (s *NetworkAdapter) handleIncomingHeader(
 		cancel()
 		return
 	}
+
+	s.wg.Add(1)
+	go notifyBlockDataArrival(
+		bCtx, &s.wg,
+		bop.DataReady(),
+		s.blockDataArrivalCh,
+		tmelink.BlockDataArrival{
+			Height: ih.ProposedHeader.Header.Height,
+			Round:  ih.ProposedHeader.Round,
+			ID:     string(ih.ProposedHeader.Header.DataID),
+		},
+	)
 }
