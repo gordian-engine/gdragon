@@ -152,6 +152,9 @@ func TestBreathcast_hop(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	defer bop1.Wait()
+	defer cancel()
+
 	// Before we accept the stream on node 1,
 	// node 1 should already forward the broadcast headers to node 2.
 	acceptCtx, acceptCancel = context.WithTimeout(ctx, time.Second)
@@ -189,6 +192,9 @@ func TestBreathcast_hop(t *testing.T) {
 		BroadcastDetails: gotBD1,
 	})
 	require.NoError(t, err)
+
+	defer bop2.Wait()
+	defer cancel()
 
 	// Then we accept the particular streams.
 	require.NoError(t, bop1.AcceptBroadcast(
