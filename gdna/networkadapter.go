@@ -409,7 +409,7 @@ func (s *NetworkAdapter) handleActivatedSession(
 
 		liveSessions[k] = sessions{
 			// Initialize the collection of broadcasts.
-			Headers: make(map[string]cancelableBroadcast),
+			Headers: make(map[uint16]cancelableBroadcast),
 
 			VoteSession:  vs,
 			CancelVoting: cancel,
@@ -488,16 +488,11 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	if !ok {
 		// Just need to initialize the map here.
 		liveSessions[sKey] = sessions{
-			Headers: make(map[string]cancelableBroadcast),
+			Headers: make(map[uint16]cancelableBroadcast),
 		}
 	}
 
-	if _, ok := ss.Headers[string(ph.Header.Hash)]; ok {
-		// We already have a session for this hash.
-		return
-	}
-
-	// We didn't have a session, so it's time to propagate it.
+	// Need our proposer index so we can determine if we have a broadcast operation.
 	proposerIdx := -1
 	for i, pk := range votingView.ValidatorSet.PubKeys {
 		if s.pubKey.Equal(pk) {
@@ -510,6 +505,13 @@ func (s *NetworkAdapter) initiateBroadcasts(
 			"BUG: failed to find index for own pubkey in own proposal",
 		))
 	}
+
+	if _, ok := ss.Headers[uint16(proposerIdx)]; ok {
+		// We already have a session for this hash.
+		return
+	}
+
+	// Didn't have a broadcast operation, so now we can create one.
 
 	d := s.getOriginationDetails(ph.Header.Hash)
 	bopCtx, cancel := context.WithCancel(ctx)
@@ -526,7 +528,7 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	}
 
 	// Finally, store the session.
-	liveSessions[sKey].Headers[string(ph.Header.Hash)] = cancelableBroadcast{
+	liveSessions[sKey].Headers[uint16(proposerIdx)] = cancelableBroadcast{
 		Op:     bop,
 		Cancel: cancel,
 	}
@@ -665,7 +667,7 @@ func (s *NetworkAdapter) handleIncomingHeader(
 	}
 
 	// We have a matching session, so first we have to check if we raced on this particular header.
-	if cb, ok := sess.Headers[string(ih.ProposedHeader.Header.Hash)]; ok {
+	if cb, ok := sess.Headers[ih.BroadcastID.ProposerIdx]; ok {
 		// It was a race.
 		// We can just pass the stream directly to the operation.
 		if err := cb.Op.AcceptBroadcast(ctx, ih.Conn, ih.Stream); err != nil {
@@ -727,7 +729,7 @@ func (s *NetworkAdapter) handleIncomingHeader(
 	}
 
 	// Store the session.
-	sess.Headers[string(ih.ProposedHeader.Header.Hash)] = cancelableBroadcast{
+	sess.Headers[ih.BroadcastID.ProposerIdx] = cancelableBroadcast{
 		Op:     bop,
 		Cancel: cancel,
 	}

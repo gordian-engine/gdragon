@@ -6,6 +6,7 @@ import (
 	"github.com/gordian-engine/dragon/breathcast"
 	"github.com/gordian-engine/dragon/wingspan"
 	"github.com/gordian-engine/gdragon/gdwsu"
+	"github.com/gordian-engine/gordian/tm/tmconsensus"
 )
 
 // sessionSet is used within the [Strategy]
@@ -26,14 +27,18 @@ type hr struct {
 type cancelableBroadcast struct {
 	Op     *breathcast.BroadcastOperation
 	Cancel context.CancelFunc
+
+	// We always need a proposed header to go along with the broadcast,
+	// so make it available alongside the broadcast operation.
+	ProposedHeader tmconsensus.ProposedHeader
 }
 
 // sessions is the collection of header broadcasts and
 // vote gossip sessions for a given round,
 // as part of [sessionSet].
 type sessions struct {
-	// Keyed by block hash, matching the breathcast adapter session ID scheme.
-	Headers map[string]cancelableBroadcast
+	// Keyed by proposer index, matching the breathcast adapter session ID scheme.
+	Headers map[uint16]cancelableBroadcast
 
 	// Prevotes and precommits are both sent in a gdwsu session.
 	// TODO: this will need to change to handle aggregated vote sessions.

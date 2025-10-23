@@ -2,7 +2,6 @@ package gdbc_test
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"io"
 	"math/rand/v2"
@@ -125,11 +124,15 @@ func TestBreathcast_hop(t *testing.T) {
 	require.Equal(t, protocolID, b1[0])
 
 	// Broadcast ID must match height, round, and proposer index.
-	bid, err := as[1].ExtractStreamBroadcastID(s01, nil)
+	bidBytes, err := as[1].ExtractStreamBroadcastID(s01, nil)
 	require.NoError(t, err)
-	require.Equal(t, ph.Header.Height, binary.BigEndian.Uint64(bid))
-	require.Equal(t, ph.Round, binary.BigEndian.Uint32(bid[8:]))
-	require.Equal(t, uint16(0), binary.BigEndian.Uint16(bid[8+4:]))
+
+	var bid gdbc.BroadcastID
+	require.NoError(t, bid.Parse(bidBytes))
+
+	require.Equal(t, ph.Header.Height, bid.Height)
+	require.Equal(t, ph.Round, bid.Round)
+	require.Equal(t, uint16(0), bid.ProposerIdx)
 
 	// Extract the application header.
 	// Currently, gdbc just sets the entire application header
@@ -169,11 +172,14 @@ func TestBreathcast_hop(t *testing.T) {
 	require.Equal(t, protocolID, b1[0])
 
 	// Broadcast ID must match height, round, and proposer index.
-	bid, err = as[2].ExtractStreamBroadcastID(s12, nil)
+	bidBytes, err = as[2].ExtractStreamBroadcastID(s12, nil)
 	require.NoError(t, err)
-	require.Equal(t, ph.Header.Height, binary.BigEndian.Uint64(bid))
-	require.Equal(t, ph.Round, binary.BigEndian.Uint32(bid[8:]))
-	require.Equal(t, uint16(0), binary.BigEndian.Uint16(bid[8+4:]))
+
+	require.NoError(t, bid.Parse(bidBytes))
+
+	require.Equal(t, ph.Header.Height, bid.Height)
+	require.Equal(t, ph.Round, bid.Round)
+	require.Equal(t, uint16(0), bid.ProposerIdx)
 
 	ah1, _, err := breathcast.ExtractStreamApplicationHeader(s12, nil)
 	require.NoError(t, err)
