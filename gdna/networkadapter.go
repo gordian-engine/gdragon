@@ -646,8 +646,20 @@ func (s *NetworkAdapter) handleBreathcastDatagram(
 		return
 	}
 
-	// TODO: find the right broadcast operation from the given BID.
-	_ = sess
+	cb, ok := sess.Headers[d.BID.ProposerIdx]
+	if !ok {
+		// No matching broadcast ID.
+		panic(errors.New(
+			"TODO: handle datagram for valid session but missing broadcast operation",
+		))
+	}
+
+	// We have the matching operation.
+	if err := cb.Op.HandlePacket(ctx, d.Datagram); err != nil {
+		panic(fmt.Errorf(
+			"TODO: handle error in handling packet: %w", err,
+		))
+	}
 }
 
 func (s *NetworkAdapter) handleIncomingHeader(

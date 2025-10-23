@@ -9,9 +9,79 @@ import (
 	"github.com/gordian-engine/dragon/dcert"
 	"github.com/gordian-engine/dragon/dconn"
 	"github.com/gordian-engine/dragon/dquic"
+	"github.com/gordian-engine/gdragon/gdbc"
 	"github.com/gordian-engine/gdragon/gdna/internal/gdnai"
 	"github.com/stretchr/testify/require"
 )
+
+func TestStreamAccepter_breathcastDatagram(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+
+	dCh := make(chan []byte, 4)
+	sdr := stubDatagramReceiver{
+		datagrams: dCh,
+	}
+
+	dc := dconn.Conn{
+		QUIC: sdr,
+
+		// The stream accepter doesn't use the chain;
+		// it only passes it through back to the network adapter,
+		// so we can leave it empty for test.
+		Chain: dcert.Chain{},
+	}
+
+	breathcastDatagramCh := make(chan gdnai.BreathcastDatagram, 4)
+	sa := gdnai.NewStreamAccepter(
+		dc, cancel, &gdnai.StreamAccepterBase{
+			BCID: 0xF0,
+
+			BreathcastDatagrams: breathcastDatagramCh,
+		},
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go sa.ReceiveDatagrams(ctx, &wg)
+	defer wg.Wait()
+	defer cancel(nil)
+
+	// No datagram available before send.
+	select {
+	case <-breathcastDatagramCh:
+		t.Fatal("data ready before send")
+	default:
+		// Good.
+	}
+
+	// Now construct data that looks like a breathcast datagram.
+	b := []byte{0xF0}
+	bid := gdbc.BroadcastID{
+		Height:      25,
+		Round:       3,
+		ProposerIdx: 1,
+	}
+	b = bid.Append(b)
+
+	b = append(b, "some other data that the stream accepter won't inspect"...)
+
+	dCh <- b
+
+	select {
+	case d := <-breathcastDatagramCh:
+		require.Equal(t, gdnai.BreathcastDatagram{
+			Conn:     dc,
+			BID:      bid,
+			Datagram: b,
+		}, d)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for datagram")
+	}
+}
 
 func TestStreamAccepter_datagramPassthrough(t *testing.T) {
 	t.Parallel()

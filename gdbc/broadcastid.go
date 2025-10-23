@@ -36,9 +36,6 @@ func (id *BroadcastID) Parse(b []byte) error {
 // to the given destination slice,
 // reallocating if dst lacks necessary capacity.
 func (id BroadcastID) Append(dst []byte) []byte {
-	if cap(dst) < BroadcastIDLen {
-		dst = make([]byte, 0, BroadcastIDLen)
-	}
 	dst = binary.BigEndian.AppendUint64(dst, id.Height)
 	dst = binary.BigEndian.AppendUint32(dst, id.Round)
 	dst = binary.BigEndian.AppendUint16(dst, id.ProposerIdx)
