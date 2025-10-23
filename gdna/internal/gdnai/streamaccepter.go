@@ -152,12 +152,20 @@ func (a *StreamAccepter) handleBreathcastStream(
 ) {
 	// We've parsed only the protocol ID so far.
 	// Still working from the earlier read deadline before parsing the ID.
-	bid, err := a.b.BCA.ExtractStreamBroadcastID(s, nil)
+	bidBytes, err := a.b.BCA.ExtractStreamBroadcastID(s, nil)
 	if err != nil {
 		a.cancel(fmt.Errorf(
 			"failed to extract stream broadcast ID: %w", err,
 		))
 		return
+	}
+
+	var bid gdbc.BroadcastID
+	if err := bid.Parse(bidBytes); err != nil {
+		panic(fmt.Errorf(
+			"BUG: should be impossible to fail parsing a BroadcastID after extraction: %w",
+			err,
+		))
 	}
 
 	ah, _, err := breathcast.ExtractStreamApplicationHeader(s, nil)
@@ -267,7 +275,7 @@ type IncomingHeader struct {
 	Conn   dconn.Conn
 	Stream dquic.Stream
 
-	BroadcastID []byte
+	BroadcastID gdbc.BroadcastID
 
 	AppHeaderBytes []byte
 	ProposedHeader tmconsensus.ProposedHeader

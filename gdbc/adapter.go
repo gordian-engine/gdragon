@@ -199,7 +199,7 @@ func (a *Adapter) Originate(
 // IncomingBroadcastConfig is the configuration type for [*Adapter.NewIncomingBroadcast].
 type IncomingBroadcastConfig struct {
 	// Necessary to relay the broadcast to other peers.
-	BroadcastID []byte
+	BroadcastID BroadcastID
 	AppHeader   []byte
 
 	BroadcastDetails BroadcastDetails
@@ -216,7 +216,7 @@ func (a *Adapter) NewIncomingBroadcast(
 ) (*breathcast.BroadcastOperation, error) {
 	bd := cfg.BroadcastDetails
 	bop, err := a.p.NewIncomingBroadcast(ctx, breathcast.IncomingBroadcastConfig{
-		BroadcastID: cfg.BroadcastID,
+		BroadcastID: cfg.BroadcastID.Append(nil),
 
 		AppHeader: cfg.AppHeader,
 

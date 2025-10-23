@@ -655,8 +655,8 @@ func (s *NetworkAdapter) handleIncomingHeader(
 ) {
 	// First, do we have a matching session?
 	sessKey := hr{
-		H: binary.BigEndian.Uint64(ih.BroadcastID),
-		R: binary.BigEndian.Uint32(ih.BroadcastID[8:]),
+		H: ih.BroadcastID.Height,
+		R: ih.BroadcastID.Round,
 	}
 
 	sess, ok := liveSessions[sessKey]

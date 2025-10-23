@@ -1,10 +1,14 @@
 package gdnai
 
+import "github.com/gordian-engine/gdragon/gdbc"
+
 // BreathcastCheck is the value sent from the [streamAccepter]
 // to the [NetworkAdapter], for a fast check on whether a broadcast
 // matches an existing session or whether it needs to be fully parsed.
 type BreathcastCheck struct {
-	BroadcastID, AppHeader []byte
+	BroadcastID gdbc.BroadcastID
+
+	AppHeader []byte
 
 	CheckResult chan BreathcastCheckResult
 }
