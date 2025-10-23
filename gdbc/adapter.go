@@ -11,10 +11,6 @@ import (
 	"github.com/gordian-engine/dragon/breathcast/bcmerkle"
 )
 
-// The size of broadast IDs (64-bit height, 32-bit round, and 16-bit proposer ID).
-// This is required for configuring the breathcast protocol instance.
-const BroadcastIDLen = 8 + 4 + 2
-
 // Adapter adapts a [*breathcast.Protocol] to more closely match
 // the types that Gordian core wants to provide.
 type Adapter struct {

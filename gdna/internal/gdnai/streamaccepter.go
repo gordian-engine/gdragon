@@ -41,7 +41,10 @@ type StreamAccepterBase struct {
 	AcceptedStreamCh    chan<- AcceptedStream
 	AcceptedUniStreamCh chan<- AcceptedUniStream
 
-	IncomingHeaders chan<- IncomingHeader
+	IncomingHeaders     chan<- IncomingHeader
+	BreathcastDatagrams chan<- BreathcastDatagram
+
+	IncomingDatagrams chan<- IncomingDatagram
 
 	// The streamAccepter instances send on this channel,
 	// and the NetworkAdapter receives on it.
@@ -270,6 +273,85 @@ type IncomingHeader struct {
 	ProposedHeader tmconsensus.ProposedHeader
 
 	BroadcastDetails gdbc.BroadcastDetails
+}
+
+func (a *StreamAccepter) ReceiveDatagrams(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+
+LOOP:
+	for {
+		d, err := a.conn.QUIC.ReceiveDatagram(ctx)
+		if err != nil {
+			// It looks as though receive datagram can only return an error
+			// for a context cancellation or for the connection being closed.
+			// It doesn't appear that we need to distinguish them.
+			a.cancel(fmt.Errorf("error receiving datagram: %w", err))
+			return
+		}
+
+		if len(d) == 0 {
+			a.cancel(errors.New("received empty datagram"))
+			return
+		}
+
+		if d[0] == a.b.BCID {
+			// Just extract the broadcast ID
+			// and forward the datagram to the network adapter.
+			var bid gdbc.BroadcastID
+			if err := bid.Parse(d[1:]); err != nil {
+				a.cancel(fmt.Errorf(
+					"malformed broadcast ID in breathcast datagram: %w", err,
+				))
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+
+			case a.b.BreathcastDatagrams <- BreathcastDatagram{
+				Conn:     a.conn,
+				BID:      bid,
+				Datagram: d,
+			}:
+				continue LOOP
+			}
+		}
+
+		// Otherwise it was an application-level datagram.
+		// Don't process it at all; just raise it to the application.
+		select {
+		case <-ctx.Done():
+			return
+		case a.b.IncomingDatagrams <- IncomingDatagram{
+			Conn:     a.conn,
+			Datagram: d,
+		}:
+			// This datagram has been handed off.
+		}
+	}
+}
+
+// BreathcastDatagram is a partially parsed datagram
+// that is confirmed to belong the breathcast protocol
+// and that has a properly extracted broadcast ID.
+type BreathcastDatagram struct {
+	Conn dconn.Conn
+
+	BID gdbc.BroadcastID
+
+	Datagram []byte
+}
+
+// IncomingDatagram is an application-layer datagram.
+// The stream accepters send these values on the provided channel in [StreamAdapterBase].
+type IncomingDatagram struct {
+	Conn dconn.Conn
+
+	Datagram []byte
 }
 
 func (a *StreamAccepter) AcceptUniStreams(

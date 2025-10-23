@@ -64,7 +64,8 @@ type NetworkAdapter struct {
 
 	bcChecks chan gdnai.BreathcastCheck
 
-	incomingHeaders chan gdnai.IncomingHeader
+	incomingHeaders     <-chan gdnai.IncomingHeader
+	breathcastDatagrams <-chan gdnai.BreathcastDatagram
 
 	blockDataArrivalCh chan<- tmelink.BlockDataArrival
 
@@ -83,6 +84,8 @@ type AcceptedStream = gdnai.AcceptedStream
 // AcceptedUniStream is the type representing
 // a unidirectional stream accepted by the [NetworkAdapter].
 type AcceptedUniStream = gdnai.AcceptedUniStream
+
+type IncomingDatagram = gdnai.IncomingDatagram
 
 // NetworkAdapterConfig is the configuration value for [NewNetworkAdapter].
 type NetworkAdapterConfig struct {
@@ -145,6 +148,12 @@ type NetworkAdapterConfig struct {
 	// The appropriate buffer size for this channel will be application-dependent.
 	BlockDataArrivalCh chan<- tmelink.BlockDataArrival
 
+	// When the managed connections send a datagram,
+	// if it does not match a controlled protocol,
+	// the datagram is exposed through this channel.
+	// The channel must be drained or the network adapter will deadlock.
+	IncomingDatagrams chan<- IncomingDatagram
+
 	// How to deserialize a proposed header from a breathcast application header.
 	Unmarshaler tmcodec.Unmarshaler
 }
@@ -159,6 +168,11 @@ func NewNetworkAdapter(
 	// Unbuffered seems correct for this.
 	breathcastChecks := make(chan gdnai.BreathcastCheck)
 	incomingHeaders := make(chan gdnai.IncomingHeader)
+
+	// We need to be very sure to not block datagrams from being processed,
+	// so this is an unusually large channel
+	// (in the context of the dragon stack).
+	breathcastDatagrams := make(chan gdnai.BreathcastDatagram, 128)
 
 	s := &NetworkAdapter{
 		log: log,
@@ -179,7 +193,8 @@ func NewNetworkAdapter(
 
 		bcChecks: breathcastChecks,
 
-		incomingHeaders: incomingHeaders,
+		incomingHeaders:     incomingHeaders,
+		breathcastDatagrams: breathcastDatagrams,
 
 		blockDataArrivalCh: cfg.BlockDataArrivalCh,
 
@@ -188,7 +203,9 @@ func NewNetworkAdapter(
 		sab: gdnai.StreamAccepterBase{
 			AcceptedStreamCh:    cfg.AcceptedStreamCh,
 			AcceptedUniStreamCh: cfg.AcceptedUniStreamCh,
+
 			IncomingHeaders:     incomingHeaders,
+			BreathcastDatagrams: breathcastDatagrams,
 
 			BreathcastChecks: breathcastChecks,
 
@@ -270,6 +287,9 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 
 		case ih := <-s.incomingHeaders:
 			s.handleIncomingHeader(ctx, liveSessions, ih)
+
+		case d := <-s.breathcastDatagrams:
+			s.handleBreathcastDatagram(ctx, liveSessions, d)
 		}
 	}
 }
@@ -602,6 +622,30 @@ func (s *NetworkAdapter) handleBreathcastCheck(
 ) gdnai.BreathcastCheckResult {
 	// TODO: actually compare against real sessions.
 	return gdnai.BreathcastCheckNeedsProcessed
+}
+
+func (s *NetworkAdapter) handleBreathcastDatagram(
+	ctx context.Context,
+	liveSessions sessionSet,
+	d gdnai.BreathcastDatagram,
+) {
+	// First, do we have a session for this?
+	sessKey := hr{
+		H: d.BID.Height,
+		R: d.BID.Round,
+	}
+
+	sess, ok := liveSessions[sessKey]
+	if !ok {
+		// We don't have a session for this.
+		// TODO: further inspection of the packet to decide
+		// whether this was an acceptable out-of-bounds packet
+		// or whether this is congestion that should be penalized.
+		return
+	}
+
+	// TODO: find the right broadcast operation from the given BID.
+	_ = sess
 }
 
 func (s *NetworkAdapter) handleIncomingHeader(
