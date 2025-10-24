@@ -67,6 +67,8 @@ type NetworkAdapter struct {
 	incomingHeaders     <-chan gdnai.IncomingHeader
 	breathcastDatagrams <-chan gdnai.BreathcastDatagram
 
+	incomingWingspanStreams <-chan gdnai.IncomingWingspanStream
+
 	blockDataArrivalCh chan<- tmelink.BlockDataArrival
 
 	cc *dpubsub.Stream[dconn.Change]
@@ -168,6 +170,7 @@ func NewNetworkAdapter(
 	// Unbuffered seems correct for this.
 	breathcastChecks := make(chan gdnai.BreathcastCheck)
 	incomingHeaders := make(chan gdnai.IncomingHeader)
+	incomingWingspanStreams := make(chan gdnai.IncomingWingspanStream)
 
 	// We need to be very sure to not block datagrams from being processed,
 	// so this is an unusually large channel
@@ -196,6 +199,8 @@ func NewNetworkAdapter(
 		incomingHeaders:     incomingHeaders,
 		breathcastDatagrams: breathcastDatagrams,
 
+		incomingWingspanStreams: incomingWingspanStreams,
+
 		blockDataArrivalCh: cfg.BlockDataArrivalCh,
 
 		cc: cfg.ConnectionChanges,
@@ -206,6 +211,10 @@ func NewNetworkAdapter(
 
 			IncomingHeaders:     incomingHeaders,
 			BreathcastDatagrams: breathcastDatagrams,
+
+			IncomingWingspanStreams: incomingWingspanStreams,
+
+			IncomingDatagrams: nil, // TODO
 
 			BreathcastChecks: breathcastChecks,
 
@@ -271,7 +280,7 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 			return
 
 		case u := <-updates:
-			s.processUpdate(ctx, liveSessions, u)
+			s.processNetworkViewUpdate(ctx, liveSessions, u)
 
 		case <-s.cc.Ready:
 			s.handleConnectionChange(ctx, accepters)
@@ -290,6 +299,9 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 
 		case d := <-s.breathcastDatagrams:
 			s.handleBreathcastDatagram(ctx, liveSessions, d)
+
+		case iws := <-s.incomingWingspanStreams:
+			s.handleIncomingWingspanStream(ctx, liveSessions, iws)
 		}
 	}
 }
@@ -318,8 +330,8 @@ func (s *NetworkAdapter) Wait() {
 	s.wg.Wait()
 }
 
-// processUpdate handles a single network view update from the core engine.
-func (s *NetworkAdapter) processUpdate(
+// processNetworkViewUpdate handles a single network view update from the core engine.
+func (s *NetworkAdapter) processNetworkViewUpdate(
 	ctx context.Context,
 	liveSessions sessionSet,
 	u tmelink.NetworkViewUpdate,
@@ -350,6 +362,8 @@ func (s *NetworkAdapter) handleSessionChanges(
 	}
 }
 
+// handleActivatedSession responds to an activated "logical" session
+// as reported by the engine.
 func (s *NetworkAdapter) handleActivatedSession(
 	ctx context.Context,
 	liveSessions sessionSet,
@@ -363,7 +377,7 @@ func (s *NetworkAdapter) handleActivatedSession(
 		// The voting session can be initialized immediately,
 		// regardless of whether we've seen any votes yet.
 
-		// The voting session app header is just height and round.
+		// The voting session ID is just height and round.
 		voteSessionID := make([]byte, 8+4)
 		binary.BigEndian.PutUint64(voteSessionID, k.H)
 		binary.BigEndian.PutUint32(voteSessionID[8:], k.R)
@@ -371,11 +385,14 @@ func (s *NetworkAdapter) handleActivatedSession(
 		voteCtx, cancel := context.WithCancel(ctx)
 
 		var pubKeys []gcrypto.PubKey
+		var pubKeyHash []byte
 		if u.Voting != nil {
 			pubKeys = u.Voting.ValidatorSet.PubKeys
+			pubKeyHash = u.Voting.ValidatorSet.PubKeyHash
 		} else if u.NextRound != nil {
 			// Questionable but maybe okay.
 			pubKeys = u.NextRound.ValidatorSet.PubKeys
+			pubKeyHash = u.NextRound.ValidatorSet.PubKeyHash
 		} else {
 			panic(fmt.Errorf(
 				"BUG: cannot retrieve public keys for activated voting round at %d/%d due to missing views",
@@ -390,7 +407,7 @@ func (s *NetworkAdapter) handleActivatedSession(
 			s.sigScheme,
 		)
 
-		vs, err := s.ws.NewSession(
+		voteSess, err := s.ws.NewSession(
 			voteCtx,
 			voteSessionID,
 			nil, // TODO: what do we actually need in the appHeader?
@@ -411,9 +428,26 @@ func (s *NetworkAdapter) handleActivatedSession(
 			// Initialize the collection of broadcasts.
 			Headers: make(map[uint16]cancelableBroadcast),
 
-			VoteSession:  vs,
+			VoteSession:  voteSess,
+			CentralState: voteState,
 			CancelVoting: cancel,
 		}
+
+		s.wg.Add(2)
+		go forwardUnaggregatedPrevotes(
+			ctx, &s.wg,
+			k.H, k.R,
+			string(pubKeyHash),
+			s.h,
+			voteState.Prevotes(),
+		)
+		go forwardUnaggregatedPrecommits(
+			ctx, &s.wg,
+			k.H, k.R,
+			string(pubKeyHash),
+			s.h,
+			voteState.Precommits(),
+		)
 	}
 }
 
@@ -658,6 +692,33 @@ func (s *NetworkAdapter) handleBreathcastDatagram(
 	if err := cb.Op.HandlePacket(ctx, d.Datagram); err != nil {
 		panic(fmt.Errorf(
 			"TODO: handle error in handling packet: %w", err,
+		))
+	}
+}
+
+func (s *NetworkAdapter) handleIncomingWingspanStream(
+	ctx context.Context,
+	liveSessions sessionSet,
+	iws gdnai.IncomingWingspanStream,
+) {
+	// Check session first.
+	sessKey := hr{
+		H: iws.SessionHeight,
+		R: iws.SessionRound,
+	}
+
+	sess, ok := liveSessions[sessKey]
+	if !ok {
+		// No session matches.
+		// TODO: decide if we need to close the stream or the connection.
+		return
+	}
+
+	// Okay, we have a session for this height/round,
+	// which means we also have a wingspan session.
+	if err := sess.VoteSession.AcceptStream(ctx, iws.Conn, iws.Stream); err != nil {
+		panic(fmt.Errorf(
+			"TODO: handle error when accepting wingspan stream: %w", err,
 		))
 	}
 }

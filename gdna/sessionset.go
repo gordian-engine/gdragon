@@ -46,5 +46,11 @@ type sessions struct {
 		gdwsu.ParsedPacket, gdwsu.OutboundPacket,
 		gdwsu.ReceivedFromPeer, gdwsu.UpdateFromCentral,
 	]
+	// We need direct access to the central state
+	// to set self-originated votes
+	// and to access newly received votes.
+	CentralState *gdwsu.CentralState
+
+	// Cancels the vote session and the central state.
 	CancelVoting context.CancelFunc
 }

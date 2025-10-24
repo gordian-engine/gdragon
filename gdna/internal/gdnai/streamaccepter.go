@@ -2,6 +2,7 @@ package gdnai
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"github.com/gordian-engine/dragon/breathcast"
 	"github.com/gordian-engine/dragon/dconn"
 	"github.com/gordian-engine/dragon/dquic"
+	"github.com/gordian-engine/dragon/wingspan"
 	"github.com/gordian-engine/gdragon/gdbc"
 	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
@@ -43,6 +45,8 @@ type StreamAccepterBase struct {
 
 	IncomingHeaders     chan<- IncomingHeader
 	BreathcastDatagrams chan<- BreathcastDatagram
+
+	IncomingWingspanStreams chan<- IncomingWingspanStream
 
 	IncomingDatagrams chan<- IncomingDatagram
 
@@ -416,6 +420,47 @@ func (a *StreamAccepter) handleWingspanStream(
 	ctx context.Context,
 	s dquic.ReceiveStream,
 ) {
-	// TODO: these streams are created immediately upon round activation,
-	// so we need to create and manage the stream here even if tests are exercising them yet.
+	// We've confirmed the protocol ID,
+	// now need to extract the session ID and application header.
+	// We don't have a reference to the protocol instance,
+	// and we know the fixed size of the session ID,
+	// so we will just manually extract it here.
+	// This should have sufficient test coverage,
+	// so risk of breakage here is minimal.
+	sidBuf := make([]byte, 8+4)
+	if _, err := io.ReadFull(s, sidBuf); err != nil {
+		a.cancel(fmt.Errorf("failed to read session ID: %w", err))
+		return
+	}
+
+	ah, err := wingspan.ExtractStreamApplicationHeader(s, nil)
+	if err != nil {
+		a.cancel(fmt.Errorf("failed to extract stream application header: %w", err))
+		return
+	}
+
+	// We omit the application header in this wingspan usage.
+	// Let's not assume whether the extraction returns nil, though.
+	if len(ah) != 0 {
+		a.cancel(fmt.Errorf(
+			"expected zero-length application header, got %x (%d)",
+			ah, len(ah),
+		))
+		return
+	}
+
+	iws := IncomingWingspanStream{
+		SessionHeight: binary.BigEndian.Uint64(sidBuf),
+		SessionRound:  binary.BigEndian.Uint32(sidBuf[8:]),
+
+		Conn:   a.conn,
+		Stream: s,
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case a.b.IncomingWingspanStreams <- iws:
+		// Done.
+	}
 }
