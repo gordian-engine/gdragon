@@ -262,6 +262,35 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 	}
 }
 
+// StartWithBufferedConsensusHandlers starts all the nodes in the fixture's network,
+// with each node reading from writing to its own CHBuffer instance.
+//
+// It also sets write-only channels of network view updates,
+// so the test can directly control the network view updates
+// without a running engine.
+// The network view updates are consumed directly by the [gdna.NetworkAdapter].
+func (f *Fixture) StartWithBufferedConsensusHandlers() (
+	[]chan<- tmelink.NetworkViewUpdate, []CHBuffer,
+) {
+	nNodes := len(f.Network.Nodes)
+	nvuOut := make([]chan<- tmelink.NetworkViewUpdate, nNodes)
+
+	chBufs := make([]CHBuffer, nNodes)
+	for i := range chBufs {
+		chBufs[i] = NewCHBuffer(4)
+
+		// Must be unbuffered so we confirm receipt on send.
+		nvuCh := make(chan tmelink.NetworkViewUpdate)
+
+		nvuOut[i] = nvuCh
+
+		f.NetworkAdapters[i].SetConsensusHandler(chBufs[i])
+		f.NetworkAdapters[i].Start(nvuCh)
+	}
+
+	return nvuOut, chBufs
+}
+
 func (f *Fixture) RegisterOriginationDetails(blockHash []byte, od gdna.OriginationDetails) {
 	f.odMu.Lock()
 	defer f.odMu.Unlock()

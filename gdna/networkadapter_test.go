@@ -6,11 +6,15 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bits-and-blooms/bitset"
 	"github.com/gordian-engine/gdragon/gdbc"
 	"github.com/gordian-engine/gdragon/gdna"
 	"github.com/gordian-engine/gdragon/gdna/gdnatest"
+	"github.com/gordian-engine/gordian/gcrypto"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
+	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
 	"github.com/stretchr/testify/require"
 )
@@ -84,22 +88,8 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	const nNodes = 3
 
 	// This time we do need network view update channels for each node.
-	nvuChs := make([]chan tmelink.NetworkViewUpdate, nNodes)
-	for i := range nvuChs {
-		// Must be unbuffered so we confirm receipt on send.
-		nvuChs[i] = make(chan tmelink.NetworkViewUpdate)
-	}
-
-	chBufs := make([]gdnatest.CHBuffer, nNodes)
-	for i := range chBufs {
-		chBufs[i] = gdnatest.NewCHBuffer(4)
-	}
-
 	nfx := gdnatest.NewFixture(t, ctx, nNodes)
-	for i := range nNodes {
-		nfx.NetworkAdapters[i].SetConsensusHandler(chBufs[i])
-		nfx.NetworkAdapters[i].Start(nvuChs[i])
-	}
+	nvuChs, chBufs := nfx.StartWithBufferedConsensusHandlers()
 
 	nw := nfx.Network
 	require.NoError(t, nw.Nodes[0].Node.DialAndJoin(ctx, nw.Nodes[1].UDP.LocalAddr()))
@@ -195,4 +185,265 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 
 	bda = <-nfx.BlockDataArrivalChs[2]
 	require.Equal(t, expBDA, bda)
+}
+
+func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	const nNodes = 2
+	nfx := gdnatest.NewFixture(t, ctx, nNodes)
+
+	// Join node zero to node one.
+	nw := nfx.Network
+	require.NoError(t, nw.Nodes[0].Node.DialAndJoin(ctx, nw.Nodes[1].UDP.LocalAddr()))
+
+	nvuChs, chBufs := nfx.StartWithBufferedConsensusHandlers()
+	_, _ = nvuChs, chBufs
+
+	// Use an empty VRV for the initial view.
+	u := tmelink.NetworkViewUpdate{
+		Voting: &tmconsensus.VersionedRoundView{
+			RoundView: tmconsensus.RoundView{
+				Height: 1, Round: 0,
+
+				ValidatorSet: nfx.Fx.ValSet(),
+			},
+		},
+		RoundSessionChanges: []tmelink.RoundSessionChange{
+			{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
+		},
+	}
+	nvuChs[0] <- u
+	nvuChs[1] <- u
+
+	// Preparation for nil prevotes at 0/0.
+	sigScheme := tmconsensustest.SimpleSignatureScheme{}
+	prevoteSignContent, err := tmconsensus.PrevoteSignBytes(
+		tmconsensus.VoteTarget{
+			Height: 1, Round: 0, BlockHash: "",
+		},
+		sigScheme,
+	)
+	require.NoError(t, err)
+
+	t.Run("prevote from 0 to 1", func(t *testing.T) {
+		p0, err := gcrypto.NewSimpleCommonMessageSignatureProof(
+			prevoteSignContent, nfx.Fx.ValSet().PubKeys, string(nfx.Fx.ValSet().PubKeyHash),
+		)
+		require.NoError(t, err)
+
+		sig0, err := nfx.Fx.PrivVals[0].Signer.Sign(ctx, prevoteSignContent)
+		require.NoError(t, err)
+
+		require.NoError(t, p0.AddSignature(sig0, nfx.Fx.PrivVals[0].Signer.PubKey()))
+
+		nvuChs[0] <- tmelink.NetworkViewUpdate{
+			Voting: &tmconsensus.VersionedRoundView{
+				RoundView: tmconsensus.RoundView{
+					Height: 1, Round: 0,
+
+					ValidatorSet: nfx.Fx.ValSet(),
+
+					PrevoteProofs: map[string]gcrypto.CommonMessageSignatureProof{
+						"": p0,
+					},
+				},
+			},
+		}
+
+		// With that update sent, node 1 should receive the packet with the vote.
+		// Upon receiving the vote packet, it writes to the consensus handler,
+		// which in our case is the CHBuffer instance.
+		var psp1 tmconsensus.PrevoteSparseProof
+		select {
+		case psp1 = <-chBufs[1].PrevoteSparseProofs:
+			// Assert outside of select.
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for consensus handler call")
+		}
+
+		pf1, err := psp1.ToFull(
+			gcrypto.SimpleCommonMessageSignatureProofScheme{},
+			sigScheme,
+			tmconsensustest.SimpleHashScheme{},
+			nfx.Fx.Vals(),
+		)
+		require.NoError(t, err)
+
+		// And the received proof includes the signature for the zeroth validator.
+		var bs bitset.BitSet
+		pf1.Proofs[""].SignatureBitSet(&bs)
+		require.True(t, bs.Test(0))
+	})
+
+	// Now do this again in the other direction.
+	t.Run("prevote from 1 to 0", func(t *testing.T) {
+		p1, err := gcrypto.NewSimpleCommonMessageSignatureProof(
+			prevoteSignContent, nfx.Fx.ValSet().PubKeys, string(nfx.Fx.ValSet().PubKeyHash),
+		)
+		require.NoError(t, err)
+
+		sig1, err := nfx.Fx.PrivVals[1].Signer.Sign(ctx, prevoteSignContent)
+		require.NoError(t, err)
+
+		require.NoError(t, p1.AddSignature(sig1, nfx.Fx.PrivVals[1].Signer.PubKey()))
+
+		nvuChs[1] <- tmelink.NetworkViewUpdate{
+			Voting: &tmconsensus.VersionedRoundView{
+				RoundView: tmconsensus.RoundView{
+					Height: 1, Round: 0,
+
+					ValidatorSet: nfx.Fx.ValSet(),
+
+					PrevoteProofs: map[string]gcrypto.CommonMessageSignatureProof{
+						"": p1,
+					},
+				},
+			},
+		}
+
+		var psp0 tmconsensus.PrevoteSparseProof
+		// Have to discard the self-observed prevote on zero first.
+		select {
+		case _ = <-chBufs[0].PrevoteSparseProofs:
+			// Assert outside of select.
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for consensus handler call")
+		}
+		select {
+		case psp0 = <-chBufs[0].PrevoteSparseProofs:
+			// Assert outside of select.
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for consensus handler call")
+		}
+
+		pf0, err := psp0.ToFull(
+			gcrypto.SimpleCommonMessageSignatureProofScheme{},
+			sigScheme,
+			tmconsensustest.SimpleHashScheme{},
+			nfx.Fx.Vals(),
+		)
+		require.NoError(t, err)
+
+		var bs bitset.BitSet
+		pf0.Proofs[""].SignatureBitSet(&bs)
+		require.True(t, bs.Test(1))
+	})
+
+	// Now swap precommits.
+	precommitSignContent, err := tmconsensus.PrecommitSignBytes(
+		tmconsensus.VoteTarget{
+			Height: 1, Round: 0, BlockHash: "",
+		},
+		sigScheme,
+	)
+	require.NoError(t, err)
+	t.Run("precommit from 0 to 1", func(t *testing.T) {
+		p0, err := gcrypto.NewSimpleCommonMessageSignatureProof(
+			precommitSignContent, nfx.Fx.ValSet().PubKeys, string(nfx.Fx.ValSet().PubKeyHash),
+		)
+		require.NoError(t, err)
+
+		sig0, err := nfx.Fx.PrivVals[0].Signer.Sign(ctx, precommitSignContent)
+		require.NoError(t, err)
+
+		require.NoError(t, p0.AddSignature(sig0, nfx.Fx.PrivVals[0].Signer.PubKey()))
+
+		nvuChs[0] <- tmelink.NetworkViewUpdate{
+			Voting: &tmconsensus.VersionedRoundView{
+				RoundView: tmconsensus.RoundView{
+					Height: 1, Round: 0,
+
+					ValidatorSet: nfx.Fx.ValSet(),
+
+					PrecommitProofs: map[string]gcrypto.CommonMessageSignatureProof{
+						"": p0,
+					},
+				},
+			},
+		}
+
+		// With that update sent, node 1 should receive the packet with the vote.
+		// Upon receiving the vote packet, it writes to the consensus handler,
+		// which in our case is the CHBuffer instance.
+		var psp1 tmconsensus.PrecommitSparseProof
+		select {
+		case psp1 = <-chBufs[1].PrecommitSparseProofs:
+			// Assert outside of select.
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for consensus handler call")
+		}
+
+		pf1, err := psp1.ToFull(
+			gcrypto.SimpleCommonMessageSignatureProofScheme{},
+			sigScheme,
+			tmconsensustest.SimpleHashScheme{},
+			nfx.Fx.Vals(),
+		)
+		require.NoError(t, err)
+
+		// And the received proof includes the signature for the zeroth validator.
+		var bs bitset.BitSet
+		pf1.Proofs[""].SignatureBitSet(&bs)
+		require.True(t, bs.Test(0))
+	})
+
+	t.Run("precommit from 1 to 0", func(t *testing.T) {
+		p1, err := gcrypto.NewSimpleCommonMessageSignatureProof(
+			precommitSignContent, nfx.Fx.ValSet().PubKeys, string(nfx.Fx.ValSet().PubKeyHash),
+		)
+		require.NoError(t, err)
+
+		sig1, err := nfx.Fx.PrivVals[1].Signer.Sign(ctx, precommitSignContent)
+		require.NoError(t, err)
+
+		require.NoError(t, p1.AddSignature(sig1, nfx.Fx.PrivVals[1].Signer.PubKey()))
+
+		nvuChs[1] <- tmelink.NetworkViewUpdate{
+			Voting: &tmconsensus.VersionedRoundView{
+				RoundView: tmconsensus.RoundView{
+					Height: 1, Round: 0,
+
+					ValidatorSet: nfx.Fx.ValSet(),
+
+					PrecommitProofs: map[string]gcrypto.CommonMessageSignatureProof{
+						"": p1,
+					},
+				},
+			},
+		}
+
+		// With that update sent, node 1 should receive the packet with the vote.
+		// Upon receiving the vote packet, it writes to the consensus handler,
+		// which in our case is the CHBuffer instance.
+		var psp0 tmconsensus.PrecommitSparseProof
+		select {
+		case _ = <-chBufs[0].PrecommitSparseProofs:
+			// Discard the self precommit like in the prevote case.
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for consensus handler call")
+		}
+		select {
+		case psp0 = <-chBufs[0].PrecommitSparseProofs:
+			// Assert outside of select.
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for consensus handler call")
+		}
+
+		pf0, err := psp0.ToFull(
+			gcrypto.SimpleCommonMessageSignatureProofScheme{},
+			sigScheme,
+			tmconsensustest.SimpleHashScheme{},
+			nfx.Fx.Vals(),
+		)
+		require.NoError(t, err)
+
+		// And the received proof includes the signature for the first validator.
+		var bs bitset.BitSet
+		pf0.Proofs[""].SignatureBitSet(&bs)
+		require.True(t, bs.Test(1))
+	})
 }

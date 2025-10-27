@@ -1,6 +1,7 @@
 package gdna
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/bits-and-blooms/bitset"
 	"github.com/gordian-engine/dragon/dcert"
 	"github.com/gordian-engine/dragon/dconn"
 	"github.com/gordian-engine/dragon/dpubsub"
@@ -339,6 +341,8 @@ func (s *NetworkAdapter) processNetworkViewUpdate(
 	s.handleSessionChanges(ctx, liveSessions, u)
 
 	s.initiateBroadcasts(ctx, liveSessions, u.Voting)
+
+	s.processAllVotes(ctx, liveSessions, u)
 }
 
 func (s *NetworkAdapter) handleSessionChanges(
@@ -430,6 +434,7 @@ func (s *NetworkAdapter) handleActivatedSession(
 
 			VoteSession:  voteSess,
 			CentralState: voteState,
+			VoteRecord:   new(voteRecord),
 			CancelVoting: cancel,
 		}
 
@@ -520,9 +525,9 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	}
 	ss, ok := liveSessions[sKey]
 	if !ok {
-		// Just need to initialize the map here.
 		liveSessions[sKey] = sessions{
-			Headers: make(map[uint16]cancelableBroadcast),
+			Headers:    make(map[uint16]cancelableBroadcast),
+			VoteRecord: new(voteRecord),
 		}
 	}
 
@@ -607,6 +612,159 @@ func notifyBlockDataArrival(
 		return
 	case bdaCh <- bda:
 		// Done.
+	}
+}
+
+// processAllVotes scans the network view update
+// for prevotes and precommits originating from the adapter's pubkey,
+// and then calls into the appropriate central state methods.
+func (s *NetworkAdapter) processAllVotes(
+	ctx context.Context,
+	liveSessions sessionSet,
+	u tmelink.NetworkViewUpdate,
+) {
+	if s.pubKey == nil {
+		// Calls to s.processVotes assume presence of our own public key,
+		// and if we didn't have them, then we wouldn't be sending out
+		// an original vote anyway.
+		return
+	}
+
+	if u.Committing != nil {
+		s.processVotes(ctx, liveSessions, u.Committing)
+	}
+
+	if u.Voting != nil {
+		s.processVotes(ctx, liveSessions, u.Voting)
+	}
+
+	if u.NextRound != nil {
+		s.processVotes(ctx, liveSessions, u.NextRound)
+	}
+}
+
+// processVotes adds our own vote to the central state value,
+// if detected and if not sent earlier.
+func (s *NetworkAdapter) processVotes(
+	ctx context.Context,
+	liveSessions sessionSet,
+	vrv *tmconsensus.VersionedRoundView,
+) {
+	sessKey := hr{H: vrv.Height, R: vrv.Round}
+
+	sess, ok := liveSessions[sessKey]
+	if !ok {
+		panic(fmt.Errorf(
+			"BUG: session %d/%d should have been live but was not found",
+			sessKey.H, sessKey.R,
+		))
+	}
+
+	if !sess.VoteRecord.NeedsProcessed(vrv.ValidatorSet.PubKeys, s.pubKey) {
+		return
+	}
+
+	// TODO: this bitset should probably be passed in,
+	// so we don't reallocated repeatedly.
+	bs := bitset.MustNew(uint(len(vrv.ValidatorSet.Validators)))
+
+	if !sess.VoteRecord.RecordedOwnPrevote {
+		// We need to look through each set of prevotes,
+		// as we cannot predict which one contains our vote,
+		// if any does at all.
+		for hash, proof := range vrv.PrevoteProofs {
+			// Copy the signature bits.
+			proof.SignatureBitSet(bs)
+
+			// Is our vote present?
+			if !bs.Test(uint(sess.VoteRecord.OwnKeyIdx)) {
+				continue
+			}
+
+			// We need to extract the individual signature for the central state.
+			// This is a very awkward API,
+			// because most of the Gordian code wants to abstract
+			// whether signatures are aggregated,
+			// and extracting individual signatures.
+
+			expKeyID := make([]byte, 2)
+			uo := uint16(sess.VoteRecord.OwnKeyIdx)
+			binary.BigEndian.PutUint16(expKeyID, uo)
+
+			var sig []byte
+			for _, ss := range proof.AsSparse().Signatures {
+				if bytes.Equal(expKeyID, ss.KeyID) {
+					sig = ss.Sig
+					break
+				}
+			}
+			if sig == nil {
+				panic(errors.New(
+					"BUG: reported prevote signature not found after sparse conversion",
+				))
+			}
+
+			if err := sess.CentralState.AddLocalPrevote(
+				ctx, uo, []byte(hash), sig,
+			); err != nil {
+				panic(fmt.Errorf(
+					"TODO: handle error when adding local prevote: %w", err,
+				))
+			}
+
+			sess.VoteRecord.RecordedOwnPrevote = true
+			break
+		}
+	}
+
+	// Now do the same thing, but with precommits.
+	if !sess.VoteRecord.RecordedOwnPrecommit {
+		// We need to look through each set of precommits,
+		// as we cannot predict which one contains our vote,
+		// if any does at all.
+		for hash, proof := range vrv.PrecommitProofs {
+			// Copy the signature bits.
+			proof.SignatureBitSet(bs)
+
+			// Is our vote present?
+			if !bs.Test(uint(sess.VoteRecord.OwnKeyIdx)) {
+				continue
+			}
+
+			// We need to extract the individual signature for the central state.
+			// This is a very awkward API,
+			// because most of the Gordian code wants to abstract
+			// whether signatures are aggregated,
+			// and extracting individual signatures.
+
+			expKeyID := make([]byte, 2)
+			uo := uint16(sess.VoteRecord.OwnKeyIdx)
+			binary.BigEndian.PutUint16(expKeyID, uo)
+
+			var sig []byte
+			for _, ss := range proof.AsSparse().Signatures {
+				if bytes.Equal(expKeyID, ss.KeyID) {
+					sig = ss.Sig
+					break
+				}
+			}
+			if sig == nil {
+				panic(errors.New(
+					"BUG: reported precommit signature not found after sparse conversion",
+				))
+			}
+
+			if err := sess.CentralState.AddLocalPrecommit(
+				ctx, uo, []byte(hash), sig,
+			); err != nil {
+				panic(fmt.Errorf(
+					"TODO: handle error when adding local precommit: %w", err,
+				))
+			}
+
+			sess.VoteRecord.RecordedOwnPrecommit = true
+			break
+		}
 	}
 }
 
