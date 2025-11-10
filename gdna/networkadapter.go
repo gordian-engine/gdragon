@@ -418,6 +418,11 @@ func (s *NetworkAdapter) handleActivatedSession(
 		}
 		voteState, voteDeltas := gdwsu.NewCentralState(
 			voteCtx,
+			s.log.With(
+				"na_sub", "central_vote_state",
+				"h", k.H,
+				"r", k.R,
+			),
 			k.H, k.R,
 			pubKeys,
 			s.sigLen, s.hashLen,
@@ -877,7 +882,10 @@ func (s *NetworkAdapter) handleIncomingHeader(
 
 	sess, ok := liveSessions[sessKey]
 	if !ok {
-		panic("TODO: consult consensus handler for missing session")
+		panic(fmt.Errorf(
+			"TODO: consult consensus handler for missing session (requested %d/%d)",
+			sessKey.H, sessKey.R,
+		))
 	}
 
 	// We have a matching session, so first we have to check if we raced on this particular header.

@@ -3,11 +3,14 @@ package gdwsu
 import (
 	"encoding/binary"
 	"iter"
+	"log/slog"
 
 	"github.com/bits-and-blooms/bitset"
 )
 
 type OutboundState struct {
+	log *slog.Logger
+
 	// Indexes that the central state has, which are allowed to be sent.
 	centralPrevotesAvailable   *bitset.BitSet
 	centralPrecommitsAvailable *bitset.BitSet
@@ -159,8 +162,16 @@ func (p OutboundPacket) Bytes() []byte {
 func (p OutboundPacket) MarkSent() {
 	if p.isPrecommit {
 		p.s.peerHasPrecommit.Set(uint(p.keyIdx))
+		p.s.log.Debug(
+			"Marked precommit sent to peer",
+			"key_idx", p.keyIdx,
+		)
 	} else {
 		p.s.peerHasPrevote.Set(uint(p.keyIdx))
+		p.s.log.Debug(
+			"Marked prevote sent to peer",
+			"key_idx", p.keyIdx,
+		)
 	}
 
 	if p.newHashIdx > 0 {

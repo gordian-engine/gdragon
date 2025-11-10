@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/gordian-engine/dragon/wingspan/wspacket"
@@ -12,6 +13,8 @@ import (
 )
 
 type InboundState struct {
+	log *slog.Logger
+
 	keys []gcrypto.PubKey
 
 	// Indexes that the central state has, which are allowed to be sent.
@@ -69,6 +72,12 @@ func (s *InboundState) CheckIncoming(p ParsedPacket) error {
 			return wspacket.ErrAlreadyHavePacket
 		}
 
+		s.log.Debug(
+			"Received new incoming precommit",
+			"key_idx", p.KeyIdx,
+			"target_hash", fmt.Sprintf("%x", p.TargetHash), // TODO: log hex helper.
+		)
+
 		return nil
 	}
 
@@ -90,6 +99,12 @@ func (s *InboundState) CheckIncoming(p ParsedPacket) error {
 
 		return wspacket.ErrAlreadyHavePacket
 	}
+
+	s.log.Debug(
+		"Received new incoming prevote",
+		"key_idx", p.KeyIdx,
+		"target_hash", fmt.Sprintf("%x", p.TargetHash), // TODO: log hex helper.
+	)
 
 	return nil
 }

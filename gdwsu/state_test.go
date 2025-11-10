@@ -19,6 +19,7 @@ import (
 	"github.com/gordian-engine/gordian/gcrypto/gcryptotest"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
+	"github.com/neilotoole/slogt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,9 +57,11 @@ func TestSession_pairedVotes(t *testing.T) {
 	const edSigLen = 64
 	const blakeHashLen = 32
 
+	log := slogt.New(t, slogt.Text())
 	// Set up the state and session for each node.
 	cs0, d0 := gdwsu.NewCentralState(
 		ctx,
+		log.With("idx", 0),
 		height, round,
 		pubKeys,
 		edSigLen, blakeHashLen,
@@ -75,6 +78,7 @@ func TestSession_pairedVotes(t *testing.T) {
 
 	cs1, d1 := gdwsu.NewCentralState(
 		ctx,
+		log.With("idx", 1),
 		height, round,
 		pubKeys,
 		edSigLen, blakeHashLen,
@@ -259,6 +263,7 @@ func TestSession_votes_hop(t *testing.T) {
 	const edSigLen = 64
 	const blakeHashLen = 32
 
+	log := slogt.New(t, slogt.Text())
 	css := make([]*gdwsu.CentralState, 3)
 	ds := make([]*dpubsub.Stream[gdwsu.UpdateFromCentral], 3)
 	sessions := make([]wingspan.Session[
@@ -268,6 +273,7 @@ func TestSession_votes_hop(t *testing.T) {
 	for i := range 3 {
 		css[i], ds[i] = gdwsu.NewCentralState(
 			ctx,
+			log.With("idx", i),
 			height, round,
 			pubKeys,
 			edSigLen, blakeHashLen,

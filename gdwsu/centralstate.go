@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/gordian-engine/dragon/dpubsub"
@@ -14,6 +15,8 @@ import (
 
 // CentralState is the implementation of [wspacket.CentralState] for unaggregated signatures.
 type CentralState struct {
+	log *slog.Logger
+
 	// For serialization and certain optimizations,
 	// we need to know the fixed size of signatures and block hashes.
 	sigLen, hashLen uint16
@@ -78,6 +81,7 @@ var _ wspacket.CentralState[
 // NewCentralState returns a new instance of CentralState.
 func NewCentralState(
 	ctx context.Context,
+	log *slog.Logger,
 	height uint64, round uint32,
 	keys []gcrypto.PubKey,
 	sigLen, hashLen uint16,
@@ -102,6 +106,8 @@ func NewCentralState(
 	}
 
 	s := &CentralState{
+		log: log,
+
 		sigLen:  sigLen,
 		hashLen: hashLen,
 
@@ -253,6 +259,12 @@ func (s *CentralState) handleUpdateFromPeer(d ReceivedFromPeer) error {
 
 		s.availablePrecommitBS.Set(uint(d.KeyIdx))
 
+		s.log.Debug(
+			"Verified incoming precommit",
+			"key_idx", d.KeyIdx,
+			"target_hash", fmt.Sprintf("%x", d.TargetHash), // TODO: log hex helper.
+		)
+
 		// Channel buffered to full key length,
 		// so this will not block, as long as we only send each vote once.
 		s.verifiedPrecommits <- VerifiedVote{
@@ -269,6 +281,12 @@ func (s *CentralState) handleUpdateFromPeer(d ReceivedFromPeer) error {
 		s.prevoteTargets[d.KeyIdx] = d.TargetHash
 
 		s.availablePrevoteBS.Set(uint(d.KeyIdx))
+
+		s.log.Debug(
+			"Verified incoming prevote",
+			"key_idx", d.KeyIdx,
+			"target_hash", fmt.Sprintf("%x", d.TargetHash), // TODO: log hex helper.
+		)
 
 		// Channel buffered to full key length,
 		// so this will not block, as long as we only send each vote once.
@@ -325,6 +343,8 @@ func (s *CentralState) NewOutboundRemoteState(ctx context.Context) (
 
 func (s *CentralState) newOutboundState() *OutboundState {
 	return &OutboundState{
+		log: s.log.With("cs_sub", "outbound"),
+
 		centralPrevotesAvailable:   s.availablePrevoteBS.Clone(),
 		centralPrecommitsAvailable: s.availablePrecommitBS.Clone(),
 
@@ -372,6 +392,8 @@ func (s *CentralState) NewInboundRemoteState(ctx context.Context) (
 
 func (s *CentralState) newInboundState() *InboundState {
 	i := &InboundState{
+		log: s.log.With("cs_sub", "inbound"),
+
 		keys: s.keys,
 
 		centralPrevotesAvailable:   s.availablePrevoteBS.Clone(),
