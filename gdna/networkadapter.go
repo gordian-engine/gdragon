@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 
 	"github.com/bits-and-blooms/bitset"
+	"github.com/gordian-engine/dragon/breathcast"
 	"github.com/gordian-engine/dragon/dcert"
 	"github.com/gordian-engine/dragon/dconn"
 	"github.com/gordian-engine/dragon/dpubsub"
@@ -60,7 +62,9 @@ type NetworkAdapter struct {
 
 	sigLen, hashLen uint16
 
-	getOriginationDetails func([]byte) OriginationDetails
+	getOriginationDetails func(tmconsensus.ProposedHeader) OriginationDetails
+
+	onDataReady func(context.Context, uint64, uint32, []byte, io.Reader)
 
 	startCh chan (<-chan tmelink.NetworkViewUpdate)
 
@@ -129,11 +133,18 @@ type NetworkAdapterConfig struct {
 	// This function does not return an error;
 	// inability to retrieve the origination details for a header
 	// proposed by the current validator is fatal.
-	GetOriginationDetailsFunc func(blockHash []byte) OriginationDetails
+	GetOriginationDetailsFunc func(tmconsensus.ProposedHeader) OriginationDetails
 
 	// How to get the broadcast details when decoding a proposed header.
 	// Necessary for the receiving side of a breathcast-distributed block.
 	GetBroadcastDetailsFunc func(proposalDriverAnnotations []byte) (gdbc.BroadcastDetails, error)
+
+	// Optional callback for once the data is ready for a particular broadcast operation.
+	// This function will be called after the data has been reconstructed
+	// but before the engine is notified.
+	OnDataReadyFunc func(
+		ctx context.Context, height uint64, round uint32, dataID []byte, r io.Reader,
+	)
 
 	// The [NetworkAdapter] starts goroutines per connection to accept streams.
 	// If the stream has a protocol ID that does not match a protocol owned by the adapter,
@@ -192,6 +203,8 @@ func NewNetworkAdapter(
 		hashLen:   cfg.HashLen,
 
 		getOriginationDetails: cfg.GetOriginationDetailsFunc,
+
+		onDataReady: cfg.OnDataReadyFunc,
 
 		// 1-buffered so the Start call doesn't block.
 		startCh: make(chan (<-chan tmelink.NetworkViewUpdate), 1),
@@ -552,7 +565,7 @@ func (s *NetworkAdapter) initiateBroadcasts(
 
 	// Didn't have a broadcast operation, so now we can create one.
 
-	d := s.getOriginationDetails(ph.Header.Hash)
+	d := s.getOriginationDetails(ph)
 	bopCtx, cancel := context.WithCancel(ctx)
 	bop, err := s.bc.Originate(bopCtx, d.AppHeader, d.PreparedOrigination)
 	if err != nil {
@@ -576,43 +589,13 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	s.wg.Add(1)
 	go notifyBlockDataArrival(
 		bopCtx, &s.wg,
-		bop.DataReady(),
+		bop,
 		s.blockDataArrivalCh,
-		tmelink.BlockDataArrival{
-			Height: ph.Header.Height,
-			Round:  ph.Round,
-			ID:     string(ph.Header.DataID),
-		},
+		ph.Header.Height,
+		ph.Round,
+		ph.Header.DataID,
+		s.onDataReady,
 	)
-}
-
-// notifyBlockDataArrival sends a notification on bdaCh
-// when the data is ready for a particular block.
-//
-// This is run in its own goroutine.
-func notifyBlockDataArrival(
-	ctx context.Context,
-	wg *sync.WaitGroup,
-	dataReady <-chan struct{},
-	bdaCh chan<- tmelink.BlockDataArrival,
-	bda tmelink.BlockDataArrival,
-) {
-	defer wg.Done()
-
-	// Wait for the data to be ready.
-	select {
-	case <-ctx.Done():
-		return
-	case <-dataReady:
-		// Okay to notify.
-	}
-
-	select {
-	case <-ctx.Done():
-		return
-	case bdaCh <- bda:
-		// Done.
-	}
 }
 
 // processAllVotes scans the network view update
@@ -976,12 +959,51 @@ func (s *NetworkAdapter) handleIncomingHeader(
 	s.wg.Add(1)
 	go notifyBlockDataArrival(
 		bCtx, &s.wg,
-		bop.DataReady(),
+		bop,
 		s.blockDataArrivalCh,
-		tmelink.BlockDataArrival{
-			Height: ih.ProposedHeader.Header.Height,
-			Round:  ih.ProposedHeader.Round,
-			ID:     string(ih.ProposedHeader.Header.DataID),
-		},
+		ih.ProposedHeader.Header.Height,
+		ih.ProposedHeader.Round,
+		ih.ProposedHeader.Header.DataID,
+		s.onDataReady,
 	)
+}
+
+// notifyBlockDataArrival sends a notification on bdaCh
+// when the data is ready for a particular block.
+//
+// This is run in its own goroutine.
+func notifyBlockDataArrival(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	bop *breathcast.BroadcastOperation,
+	bdaCh chan<- tmelink.BlockDataArrival,
+	height uint64,
+	round uint32,
+	dataID []byte,
+	onDataReady func(context.Context, uint64, uint32, []byte, io.Reader),
+) {
+	defer wg.Done()
+
+	// Wait for the data to be ready.
+	select {
+	case <-ctx.Done():
+		return
+	case <-bop.DataReady():
+		// Okay to notify.
+	}
+
+	if onDataReady != nil {
+		onDataReady(ctx, height, round, dataID, bop.Data(ctx))
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case bdaCh <- tmelink.BlockDataArrival{
+		Height: height,
+		Round:  round,
+		ID:     string(dataID),
+	}:
+		// Done.
+	}
 }

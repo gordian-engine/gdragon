@@ -4,8 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"sync"
+	"io"
 	"testing"
 
 	"github.com/gordian-engine/dragon/breathcast"
@@ -21,6 +22,7 @@ import (
 	"github.com/gordian-engine/gordian/gcrypto"
 	"github.com/gordian-engine/gordian/tm/tmcodec"
 	"github.com/gordian-engine/gordian/tm/tmcodec/tmjson"
+	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
 	"github.com/stretchr/testify/require"
@@ -31,6 +33,14 @@ const (
 	BreathcastProtocolID = 0xA1
 	WingspanProtocolID   = 0xA2
 )
+
+// BlockDataStore is a copy of the
+// [github.com/gordian-engine/gordian/tm/tmintegration.BlockDataStore]
+// interface, just to avoid coupling this package to that one.
+type BlockDataStore interface {
+	GetData(dataID []byte) (data []byte, ok bool)
+	PutData(dataID, data []byte)
+}
 
 // Fixture allows creating a network of dragon nodes
 // with network adapters on top of each node.
@@ -78,13 +88,12 @@ type Fixture struct {
 	NetworkAdapters []*gdna.NetworkAdapter
 
 	MarshalCodec tmcodec.MarshalCodec
-
-	odMu sync.Mutex
-	ods  map[string]gdna.OriginationDetails
 }
 
 // NewFixture returns a new Fixture.
-func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
+func NewFixture(t *testing.T, ctx context.Context, stores []BlockDataStore) *Fixture {
+	nNodes := len(stores)
+
 	configs := make([]dcerttest.CAConfig, nNodes)
 	for i := range configs {
 		configs[i] = dcerttest.FastConfig()
@@ -161,10 +170,6 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 	codec := tmjson.MarshalCodec{CryptoRegistry: new(gcrypto.Registry)}
 	gcrypto.RegisterEd25519(codec.CryptoRegistry)
 
-	// And we need one set of hte
-	var odMu sync.Mutex
-	ods := map[string]gdna.OriginationDetails{}
-
 	networkAdapters := make([]*gdna.NetworkAdapter, nNodes)
 
 	acceptedStreamChs := make([]<-chan gdna.AcceptedStream, nNodes)
@@ -201,19 +206,76 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 				SignatureLen: ed25519.SignatureSize,
 				HashLen:      32, // TODO: this needs to be a constant from tmconsensustest.
 
-				GetOriginationDetailsFunc: func(blockHash []byte) gdna.OriginationDetails {
-					odMu.Lock()
-					defer odMu.Unlock()
+				GetOriginationDetailsFunc: func(ph tmconsensus.ProposedHeader) gdna.OriginationDetails {
+					// TODO: this is currently duplicating work in gdragon/internal
+					// when we set up the ProposedHeaderInterceptor.
+					// We could possibly just store it in some shared struct.
 
-					od, ok := ods[string(blockHash)]
+					// Find block data first.
+					blockData, ok := stores[i].GetData(ph.Header.DataID)
 					if !ok {
 						panic(fmt.Errorf(
-							"attempted to get origination details for hash %x, but no entry existed",
-							blockHash,
+							"BUG: failed to get data from store, for ID %x", ph.Header.DataID,
 						))
 					}
 
-					return od
+					// Identify our proposer index.
+					proposerIdx := -1
+					proposerKey := ph.ProposerPubKey
+					for i, k := range ph.Header.ValidatorSet.PubKeys {
+						if proposerKey.Equal(k) {
+							proposerIdx = i
+							break
+						}
+					}
+
+					if proposerIdx == -1 {
+						panic(errors.New(
+							"BUG: failed to find our proposer index on intercepted proposed header",
+						))
+					}
+
+					// Right now this is the best way we have to get the hash nonce.
+					// It was already encoded in the proposed header's annotations.
+					// Unfortunately we currently have to decode the whole thing.
+					var d gdbc.BroadcastDetails
+					if err := json.Unmarshal(ph.Annotations.Driver, &d); err != nil {
+						panic(fmt.Errorf(
+							"failed to json-unmarshal broadcast details: %w", err,
+						))
+					}
+
+					po, err := gdbcAdapters[i].PrepareOrigination(gdbc.PrepareOriginationConfig{
+						BlockData: blockData,
+
+						ParityRatio: 0.1,
+
+						HashNonce: d.HashNonce,
+
+						Height:      ph.Header.Height,
+						Round:       ph.Round,
+						ProposerIdx: uint16(proposerIdx), // Assuming no chance of overflow here.
+					})
+					if err != nil {
+						panic(fmt.Errorf("failed to prepare origination: %w", err))
+					}
+
+					phBytes, err := codec.MarshalProposedHeader(ph)
+
+					return gdna.OriginationDetails{
+						AppHeader:           phBytes,
+						PreparedOrigination: po,
+					}
+				},
+
+				OnDataReadyFunc: func(
+					ctx context.Context, height uint64, round uint32, dataID []byte, r io.Reader,
+				) {
+					data, err := io.ReadAll(r)
+					if err != nil {
+						panic(err)
+					}
+					stores[i].PutData(dataID, data)
 				},
 
 				GetBroadcastDetailsFunc: func(proposalDriverAnnotation []byte) (gdbc.BroadcastDetails, error) {
@@ -257,8 +319,6 @@ func NewFixture(t *testing.T, ctx context.Context, nNodes int) *Fixture {
 		NetworkAdapters: networkAdapters,
 
 		MarshalCodec: codec,
-
-		ods: ods,
 	}
 }
 
@@ -289,11 +349,4 @@ func (f *Fixture) StartWithBufferedConsensusHandlers() (
 	}
 
 	return nvuOut, chBufs
-}
-
-func (f *Fixture) RegisterOriginationDetails(blockHash []byte, od gdna.OriginationDetails) {
-	f.odMu.Lock()
-	defer f.odMu.Unlock()
-
-	f.ods[string(blockHash)] = od
 }

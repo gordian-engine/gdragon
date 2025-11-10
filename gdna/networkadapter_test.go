@@ -10,12 +10,12 @@ import (
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/gordian-engine/gdragon/gdbc"
-	"github.com/gordian-engine/gdragon/gdna"
 	"github.com/gordian-engine/gdragon/gdna/gdnatest"
 	"github.com/gordian-engine/gordian/gcrypto"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
+	"github.com/gordian-engine/gordian/tm/tmintegration"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +25,11 @@ func TestNetworkAdapter_applicationProtocolsExposed(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	nfx := gdnatest.NewFixture(t, ctx, 2)
+	blockDataStores := make([]gdnatest.BlockDataStore, 2)
+	for i := range blockDataStores {
+		blockDataStores[i] = tmintegration.NewBlockDataMap()
+	}
+	nfx := gdnatest.NewFixture(t, ctx, blockDataStores)
 	nfx.NetworkAdapters[0].Start(nil)
 	nfx.NetworkAdapters[1].Start(nil)
 
@@ -88,7 +92,12 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	const nNodes = 3
 
 	// This time we do need network view update channels for each node.
-	nfx := gdnatest.NewFixture(t, ctx, nNodes)
+	blockDataStores := make([]gdnatest.BlockDataStore, nNodes)
+	for i := range blockDataStores {
+		blockDataStores[i] = tmintegration.NewBlockDataMap()
+	}
+	nfx := gdnatest.NewFixture(t, ctx, blockDataStores)
+
 	nvuChs, chBufs := nfx.StartWithBufferedConsensusHandlers()
 
 	nw := nfx.Network
@@ -120,6 +129,11 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	// Make some random enough data for the block.
 	blockData := []byte(strings.Repeat("abcdefghijklmnopqrstuv", 1024))
 
+	// And we have to manually put that data in the block data store, for this test.
+	// Normally the consensus strategy would do this directly,
+	// or we would do this in the proposed header interceptor.
+	blockDataStores[0].PutData([]byte(dataID), blockData)
+
 	// The node has to prepare an origination through the breathcast adapter.
 	nonce := []byte{1, 2, 4, 8, 16} // Arbitrary nonce for origination.
 	po, err := nfx.GDBCAdapters[0].PrepareOrigination(gdbc.PrepareOriginationConfig{
@@ -138,17 +152,6 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	nfx.Fx.SignProposal(ctx, &ph, 0)
-
-	phBytes, err := nfx.MarshalCodec.MarshalProposedHeader(ph)
-	require.NoError(t, err)
-
-	od := gdna.OriginationDetails{
-		AppHeader:           phBytes,
-		PreparedOrigination: po,
-	}
-
-	// This is for the outgoing broadcast only.
-	nfx.RegisterOriginationDetails(ph.Header.Hash, od)
 
 	// Make a separate update for the proposer,
 	// to avoid possible memory conflict.
@@ -194,7 +197,11 @@ func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
 	defer cancel()
 
 	const nNodes = 2
-	nfx := gdnatest.NewFixture(t, ctx, nNodes)
+	blockDataStores := make([]gdnatest.BlockDataStore, nNodes)
+	for i := range blockDataStores {
+		blockDataStores[i] = tmintegration.NewBlockDataMap()
+	}
+	nfx := gdnatest.NewFixture(t, ctx, blockDataStores)
 
 	// Join node zero to node one.
 	nw := nfx.Network
@@ -268,8 +275,8 @@ func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
 		pf1, err := psp1.ToFull(
 			gcrypto.SimpleCommonMessageSignatureProofScheme{},
 			sigScheme,
-			tmconsensustest.SimpleHashScheme{},
-			nfx.Fx.Vals(),
+			nfx.Fx.ValSet().PubKeys,
+			string(nfx.Fx.ValSet().PubKeyHash),
 		)
 		require.NoError(t, err)
 
@@ -323,8 +330,8 @@ func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
 		pf0, err := psp0.ToFull(
 			gcrypto.SimpleCommonMessageSignatureProofScheme{},
 			sigScheme,
-			tmconsensustest.SimpleHashScheme{},
-			nfx.Fx.Vals(),
+			nfx.Fx.ValSet().PubKeys,
+			string(nfx.Fx.ValSet().PubKeyHash),
 		)
 		require.NoError(t, err)
 
@@ -380,8 +387,8 @@ func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
 		pf1, err := psp1.ToFull(
 			gcrypto.SimpleCommonMessageSignatureProofScheme{},
 			sigScheme,
-			tmconsensustest.SimpleHashScheme{},
-			nfx.Fx.Vals(),
+			nfx.Fx.ValSet().PubKeys,
+			string(nfx.Fx.ValSet().PubKeyHash),
 		)
 		require.NoError(t, err)
 
@@ -436,8 +443,8 @@ func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
 		pf0, err := psp0.ToFull(
 			gcrypto.SimpleCommonMessageSignatureProofScheme{},
 			sigScheme,
-			tmconsensustest.SimpleHashScheme{},
-			nfx.Fx.Vals(),
+			nfx.Fx.ValSet().PubKeys,
+			string(nfx.Fx.ValSet().PubKeyHash),
 		)
 		require.NoError(t, err)
 
