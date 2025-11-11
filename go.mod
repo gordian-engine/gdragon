@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/bits-and-blooms/bitset v1.22.0
 	github.com/gordian-engine/dragon v0.0.0-20251022191408-e135212dfbe2
-	github.com/gordian-engine/gordian v0.0.0-20251107215137-db0b27f958c8
+	github.com/gordian-engine/gordian v0.0.0-20251111184143-fb186404462c
 	github.com/neilotoole/slogt v1.1.0
 	github.com/stretchr/testify v1.10.0
 )

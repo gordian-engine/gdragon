@@ -55,6 +55,12 @@ func (n *gdNetwork) SetConsensusHandler(
 	n.nfx.NetworkAdapters[idx].SetConsensusHandler(h)
 }
 
+func (n *gdNetwork) GetBlockDataArrivalChannel(
+	_ context.Context, idx int,
+) <-chan tmelink.BlockDataArrival {
+	return n.nfx.BlockDataArrivalChs[idx]
+}
+
 func (n *gdNetwork) GetProposedHeaderInterceptor(
 	_ context.Context, idx int,
 ) tmelink.ProposedHeaderInterceptor {
