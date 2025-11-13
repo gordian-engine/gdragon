@@ -365,8 +365,33 @@ func (s *NetworkAdapter) handleSessionChanges(
 ) {
 	for _, c := range u.RoundSessionChanges {
 		if c.State == tmelink.RoundSessionStateActive {
-			s.handleActivatedSession(ctx, liveSessions, u, c.Height, c.Round)
-			continue
+			if u.Voting != nil && u.Voting.Height == c.Height && u.Voting.Round == c.Round {
+				s.handleActivatedSession(
+					ctx,
+					liveSessions,
+					c.Height,
+					c.Round,
+					u.Voting.ValidatorSet.PubKeys,
+					u.Voting.ValidatorSet.PubKeyHash,
+				)
+				continue
+			}
+
+			if u.Committing != nil && u.Committing.Height == c.Height && u.Committing.Round == c.Round {
+				s.handleActivatedSession(
+					ctx,
+					liveSessions,
+					c.Height,
+					c.Round,
+					u.Committing.ValidatorSet.PubKeys,
+					u.Committing.ValidatorSet.PubKeyHash,
+				)
+				continue
+			}
+
+			panic(errors.New(
+				"BUG: received network view update that activated session which did not match voting or committing",
+			))
 		}
 
 		if c.State == tmelink.RoundSessionStateExpired {
@@ -384,9 +409,10 @@ func (s *NetworkAdapter) handleSessionChanges(
 func (s *NetworkAdapter) handleActivatedSession(
 	ctx context.Context,
 	liveSessions sessionSet,
-	u tmelink.NetworkViewUpdate,
 	h uint64,
 	r uint32,
+	pubKeys []gcrypto.PubKey,
+	pubKeyHash []byte,
 ) {
 	// Active session -- make sure we have an entry in liveSessions.
 	k := hr{H: h, R: r}
@@ -401,21 +427,6 @@ func (s *NetworkAdapter) handleActivatedSession(
 
 		voteCtx, cancel := context.WithCancel(ctx)
 
-		var pubKeys []gcrypto.PubKey
-		var pubKeyHash []byte
-		if u.Voting != nil {
-			pubKeys = u.Voting.ValidatorSet.PubKeys
-			pubKeyHash = u.Voting.ValidatorSet.PubKeyHash
-		} else if u.NextRound != nil {
-			// Questionable but maybe okay.
-			pubKeys = u.NextRound.ValidatorSet.PubKeys
-			pubKeyHash = u.NextRound.ValidatorSet.PubKeyHash
-		} else {
-			panic(fmt.Errorf(
-				"BUG: cannot retrieve public keys for activated voting round at %d/%d due to missing views",
-				h, r,
-			))
-		}
 		voteState, voteDeltas := gdwsu.NewCentralState(
 			voteCtx,
 			s.log.With(
@@ -588,6 +599,8 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	liveSessions[sKey].Headers[uint16(proposerIdx)] = cancelableBroadcast{
 		Op:     bop,
 		Cancel: cancel,
+
+		ProposedHeader: ph,
 	}
 
 	// And link the operation's data to the block data arrival.
@@ -855,13 +868,75 @@ func (s *NetworkAdapter) handleIncomingWingspanStream(
 
 	sess, ok := liveSessions[sessKey]
 	if !ok {
-		// No session matches.
-		// TODO: decide if we need to close the stream or the connection.
+		s.handleMissingSessionWingspanStream(ctx, liveSessions, iws)
 		return
 	}
 
 	// Okay, we have a session for this height/round,
 	// which means we also have a wingspan session.
+	if err := sess.VoteSession.AcceptStream(ctx, iws.Conn, iws.Stream); err != nil {
+		panic(fmt.Errorf(
+			"TODO: handle error when accepting wingspan stream: %w", err,
+		))
+	}
+}
+
+func (s *NetworkAdapter) handleMissingSessionWingspanStream(
+	ctx context.Context,
+	liveSessions sessionSet,
+	iws gdnai.IncomingWingspanStream,
+) {
+	// If underflow here, we just won't find a matching session.
+	prevHeight := iws.SessionHeight - 1
+	found := false
+	var prevSess sessions
+	for k, ss := range liveSessions {
+		if k.H == prevHeight {
+			// Any session with the previous height; round unimportant.
+			prevSess = ss
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Didn't find it.
+		panic(errors.New(
+			"TODO: need to reject this stream (due to no prev match) with a meaningful error code",
+		))
+	}
+
+	// We found a session with the previous height.
+	// Does the incoming stream match the pub key hash?
+	var valSet tmconsensus.ValidatorSet
+	found = false
+	for _, cb := range prevSess.Headers {
+		valSet = cb.ProposedHeader.Header.NextValidatorSet
+		found = true
+		break
+	}
+	if !found {
+		panic(errors.New(
+			"TODO: need to reject this stream (due to no prev header) with a meaningful error code",
+		))
+	}
+
+	s.handleActivatedSession(
+		ctx,
+		liveSessions,
+		iws.SessionHeight, iws.SessionRound,
+		valSet.PubKeys,
+		valSet.PubKeyHash,
+	)
+
+	sess, ok := liveSessions[hr{
+		H: iws.SessionHeight,
+		R: iws.SessionRound,
+	}]
+	if !ok {
+		s.log.Warn("Attempted to handle session but there must have been a context error")
+		return
+	}
+
 	if err := sess.VoteSession.AcceptStream(ctx, iws.Conn, iws.Stream); err != nil {
 		panic(fmt.Errorf(
 			"TODO: handle error when accepting wingspan stream: %w", err,
@@ -954,6 +1029,8 @@ func (s *NetworkAdapter) handleIncomingHeader(
 	sess.Headers[ih.BroadcastID.ProposerIdx] = cancelableBroadcast{
 		Op:     bop,
 		Cancel: cancel,
+
+		ProposedHeader: ih.ProposedHeader,
 	}
 
 	// And finally add the incoming stream to that session.

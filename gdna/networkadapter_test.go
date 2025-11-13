@@ -1,6 +1,7 @@
 package gdna_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -453,4 +454,123 @@ func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
 		pf0.Proofs[""].SignatureBitSet(&bs)
 		require.True(t, bs.Test(1))
 	})
+}
+
+func TestNetworkAdapter_votesForNextHeight(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	const nNodes = 2
+
+	// This time we do need network view update channels for each node.
+	blockDataStores := make([]gdnatest.BlockDataStore, nNodes)
+	for i := range blockDataStores {
+		blockDataStores[i] = tmintegration.NewBlockDataMap()
+	}
+	nfx := gdnatest.NewFixture(t, ctx, blockDataStores)
+
+	nvuChs, chBufs := nfx.StartWithBufferedConsensusHandlers()
+
+	nw := nfx.Network
+	require.NoError(t, nw.Nodes[0].Node.DialAndJoin(ctx, nw.Nodes[1].UDP.LocalAddr()))
+
+	// Tell both nodes that we are at initial height.
+	// Normally this would also include the next round view,
+	// but it should be fine to omit that in test here.
+	u := tmelink.NetworkViewUpdate{
+		Voting: &tmconsensus.VersionedRoundView{
+			RoundView: tmconsensus.RoundView{
+				Height: 1, Round: 0,
+
+				ValidatorSet: nfx.Fx.ValSet(),
+			},
+		},
+		RoundSessionChanges: []tmelink.RoundSessionChange{
+			{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
+		},
+	}
+	nvuChs[0] <- u
+	nvuChs[1] <- u
+
+	// Proposed block for 1/0.
+	const dataID = "dataid1"
+	ph := nfx.Fx.NextProposedHeader([]byte(dataID), 0)
+	blockData := bytes.Repeat([]byte("abcdefg"), 8*1024)
+	blockDataStores[0].PutData([]byte(dataID), blockData)
+
+	// The node has to prepare an origination through the breathcast adapter,
+	// in order to sign the correct data.
+	// Normally this would happen through the engine and the ProposedHeaderInterceptor.
+	nonce := []byte{2, 4, 8, 16, 32} // Arbitrary nonce for origination.
+	po, err := nfx.GDBCAdapters[0].PrepareOrigination(gdbc.PrepareOriginationConfig{
+		BlockData: blockData,
+
+		ParityRatio: 0.1,
+
+		HashNonce: nonce,
+
+		Height: 1, Round: 0,
+		ProposerIdx: 0,
+	})
+	require.NoError(t, err)
+
+	ph.Annotations.Driver, err = json.Marshal(po.BroadcastDetails())
+	require.NoError(t, err)
+
+	nfx.Fx.SignProposal(ctx, &ph, 0)
+
+	// Send as a network view update directly to both validators,
+	// so we don't need to directly originate a block in this test.
+	nvuChs[0] <- tmelink.NetworkViewUpdate{
+		Voting: &tmconsensus.VersionedRoundView{
+			RoundView: tmconsensus.RoundView{
+				Height: 1, Round: 0,
+
+				ValidatorSet: nfx.Fx.ValSet(),
+
+				ProposedHeaders: []tmconsensus.ProposedHeader{ph},
+			},
+		},
+		RoundSessionChanges: []tmelink.RoundSessionChange{
+			{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
+		},
+	}
+
+	// Now, if the second validator makes a prevote for the next height,
+	// the first validator should see it and accept it.
+	nvuChs[1] <- tmelink.NetworkViewUpdate{
+		Voting: &tmconsensus.VersionedRoundView{
+			RoundView: tmconsensus.RoundView{
+				Height: 2, Round: 0,
+
+				ValidatorSet: nfx.Fx.ValSet(),
+
+				PrevoteProofs: nfx.Fx.PrevoteProofMap(
+					ctx, 2, 0, map[string][]int{
+						"": {1},
+					},
+				),
+			},
+		},
+		RoundSessionChanges: []tmelink.RoundSessionChange{
+			{Height: 2, Round: 0, State: tmelink.RoundSessionStateActive},
+		},
+	}
+
+	var psp tmconsensus.PrevoteSparseProof
+	select {
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for prevote proof confirmation")
+	case psp = <-chBufs[0].PrevoteSparseProofs:
+		// Okay, finish assertions outside of block.
+	}
+	require.Equal(t, uint64(2), psp.Height)
+	require.Zero(t, psp.Round)
+	require.Equal(t, string(nfx.Fx.ValSet().PubKeyHash), psp.PubKeyHash)
+
+	// Contains prevote for nil block.
+	require.Contains(t, psp.Proofs, "")
+	require.Len(t, psp.Proofs[""], 1) // Only one signature in the proof.
 }
