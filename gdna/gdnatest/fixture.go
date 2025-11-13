@@ -273,6 +273,12 @@ func NewFixture(t *testing.T, ctx context.Context, stores []BlockDataStore) *Fix
 				) {
 					data, err := io.ReadAll(r)
 					if err != nil {
+						if errors.Is(err, context.Canceled) {
+							// Seems fine to silently swallow the error here,
+							// as we can assume the test is shutting down in the middle of this operation.
+							return
+						}
+
 						panic(err)
 					}
 					stores[i].PutData(dataID, data)

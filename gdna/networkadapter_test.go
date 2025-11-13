@@ -105,9 +105,8 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	require.NoError(t, nw.Nodes[0].Node.DialAndJoin(ctx, nw.Nodes[1].UDP.LocalAddr()))
 	require.NoError(t, nw.Nodes[1].Node.DialAndJoin(ctx, nw.Nodes[2].UDP.LocalAddr()))
 
-	// First, tell nodes 1 and 2 that we are at initial height.
-	// Normally this would also include the next round view,
-	// but it should be fine to omit that in test here.
+	// All the nodes need to be aware of the initial height,
+	// just as would happen during normal engine initialization.
 	u := tmelink.NetworkViewUpdate{
 		Voting: &tmconsensus.VersionedRoundView{
 			RoundView: tmconsensus.RoundView{
@@ -120,6 +119,7 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 			{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
 		},
 	}
+	nvuChs[0] <- u
 	nvuChs[1] <- u
 	nvuChs[2] <- u
 

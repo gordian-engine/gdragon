@@ -875,6 +875,9 @@ func (s *NetworkAdapter) handleIncomingWingspanStream(
 	// Okay, we have a session for this height/round,
 	// which means we also have a wingspan session.
 	if err := sess.VoteSession.AcceptStream(ctx, iws.Conn, iws.Stream); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		panic(fmt.Errorf(
 			"TODO: handle error when accepting wingspan stream: %w", err,
 		))
@@ -900,8 +903,9 @@ func (s *NetworkAdapter) handleMissingSessionWingspanStream(
 	}
 	if !found {
 		// Didn't find it.
-		panic(errors.New(
-			"TODO: need to reject this stream (due to no prev match) with a meaningful error code",
+		panic(fmt.Errorf(
+			"TODO: need to reject this stream (height %d, due to no prev match) with a meaningful error code",
+			iws.SessionHeight,
 		))
 	}
 
