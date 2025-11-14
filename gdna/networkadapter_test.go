@@ -472,6 +472,87 @@ func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {
 	})
 }
 
+func TestNetworkAdapter_sessions(t *testing.T) {
+	t.Run("next round", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		const nNodes = 3
+
+		// This time we do need network view update channels for each node.
+		blockDataStores := make([]gdnatest.BlockDataStore, nNodes)
+		for i := range blockDataStores {
+			blockDataStores[i] = tmintegration.NewBlockDataMap()
+		}
+		nfx := gdnatest.NewFixture(t, ctx, blockDataStores)
+
+		nvuChs, chBufs := nfx.StartWithBufferedConsensusHandlers()
+
+		nw := nfx.Network
+		require.NoError(t, nw.Nodes[0].Node.DialAndJoin(ctx, nw.Nodes[1].UDP.LocalAddr()))
+		require.NoError(t, nw.Nodes[0].Node.DialAndJoin(ctx, nw.Nodes[2].UDP.LocalAddr()))
+
+		// All the nodes need to be aware of the initial height,
+		// just as would happen during normal engine initialization.
+		u := tmelink.NetworkViewUpdate{
+			Voting: &tmconsensus.VersionedRoundView{
+				RoundView: tmconsensus.RoundView{
+					Height: 1, Round: 0,
+
+					ValidatorSet: nfx.Fx.ValSet(),
+				},
+			},
+			RoundSessionChanges: []tmelink.RoundSessionChange{
+				{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
+			},
+		}
+		nvuChs[0] <- u
+		nvuChs[1] <- u
+		nvuChs[2] <- u
+
+		// Now there is a vote in the VRV's NextRound, by the third validator.
+		// (It has to go to that third node,
+		// so the node identifies the NVU as needing a broadcast
+		// due to public key matching.)
+		nvuChs[2] <- tmelink.NetworkViewUpdate{
+			NextRound: &tmconsensus.VersionedRoundView{
+				RoundView: tmconsensus.RoundView{
+					Height: 1, Round: 1,
+
+					ValidatorSet: nfx.Fx.ValSet(),
+
+					PrevoteProofs: nfx.Fx.PrevoteProofMap(
+						ctx, 1, 1, map[string][]int{
+							"": {2},
+						},
+					),
+				},
+			},
+			RoundSessionChanges: []tmelink.RoundSessionChange{
+				{Height: 1, Round: 1, State: tmelink.RoundSessionStateActive},
+			},
+		}
+
+		// Then that vote is broadcast to another node who didn't yet have 1/1 activated.
+		var psp tmconsensus.PrevoteSparseProof
+		select {
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for prevote proof confirmation")
+		case psp = <-chBufs[1].PrevoteSparseProofs:
+			// Okay, finish assertions outside of block.
+		}
+		require.Equal(t, uint64(1), psp.Height)
+		require.Equal(t, uint32(1), psp.Round)
+		require.Equal(t, string(nfx.Fx.ValSet().PubKeyHash), psp.PubKeyHash)
+
+		// Contains prevote for nil block.
+		require.Contains(t, psp.Proofs, "")
+		require.Len(t, psp.Proofs[""], 1) // Only one signature in the proof.
+	})
+}
+
 func TestNetworkAdapter_votesForNextHeight(t *testing.T) {
 	t.Parallel()
 

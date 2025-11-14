@@ -400,8 +400,19 @@ func (s *NetworkAdapter) handleSessionChanges(
 				continue
 			}
 
+			if u.NextRound != nil && u.NextRound.Height == c.Height && u.NextRound.Round == c.Round {
+				s.handleActivatedSession(
+					ctx,
+					liveSessions,
+					c.Height,
+					c.Round,
+					u.NextRound.ValidatorSet,
+				)
+				continue
+			}
+
 			panic(errors.New(
-				"BUG: received network view update that activated session which did not match voting or committing",
+				"BUG: received network view update that activated session which did not match voting, committing, or next round",
 			))
 		}
 
@@ -907,38 +918,35 @@ func (s *NetworkAdapter) handleMissingSessionWingspanStream(
 	liveSessions sessionSet,
 	iws gdnai.IncomingWingspanStream,
 ) {
-	// If underflow here, we just won't find a matching session.
-	prevHeight := iws.SessionHeight - 1
+	var valSet tmconsensus.ValidatorSet
 	found := false
-	var prevSess sessions
 	for k, ss := range liveSessions {
-		if k.H == prevHeight {
-			// Any session with the previous height; round unimportant.
-			prevSess = ss
+		// If we found the same height, then we know the validators.
+		// TODO: we should actually compare the round here,
+		// to not re-activate an earlier round in this height.
+		if k.H == iws.SessionHeight {
+			valSet = ss.ValidatorSet
 			found = true
 			break
 		}
-	}
-	if !found {
-		// Didn't find it.
-		panic(fmt.Errorf(
-			"TODO: need to reject this stream (height %d, due to no prev match) with a meaningful error code",
-			iws.SessionHeight,
-		))
+
+		// If we found a previous height, then we may know the validators
+		// if we have a proposed block.
+		// Underflow is not a problem in this height check.
+		if k.H == iws.SessionHeight-1 && len(ss.Headers) > 0 {
+			for _, cb := range ss.Headers {
+				valSet = cb.ProposedHeader.Header.NextValidatorSet
+				found = true
+				break
+			}
+			break
+		}
 	}
 
-	// We found a session with the previous height.
-	// Does the incoming stream match the pub key hash?
-	var valSet tmconsensus.ValidatorSet
-	found = false
-	for _, cb := range prevSess.Headers {
-		valSet = cb.ProposedHeader.Header.NextValidatorSet
-		found = true
-		break
-	}
 	if !found {
-		panic(errors.New(
-			"TODO: need to reject this stream (due to no prev header) with a meaningful error code",
+		panic(fmt.Errorf(
+			"TODO: reject wingspan stream for %d/%d (due to not being able to find validator set)",
+			iws.SessionHeight, iws.SessionRound,
 		))
 	}
 
