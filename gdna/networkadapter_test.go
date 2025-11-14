@@ -31,8 +31,24 @@ func TestNetworkAdapter_applicationProtocolsExposed(t *testing.T) {
 		blockDataStores[i] = tmintegration.NewBlockDataMap()
 	}
 	nfx := gdnatest.NewFixture(t, ctx, blockDataStores)
-	nfx.NetworkAdapters[0].Start(nil)
-	nfx.NetworkAdapters[1].Start(nil)
+
+	nvuChs, _ := nfx.StartWithBufferedConsensusHandlers()
+
+	// Send initial state to unblock network adapters.
+	u := tmelink.NetworkViewUpdate{
+		Voting: &tmconsensus.VersionedRoundView{
+			RoundView: tmconsensus.RoundView{
+				Height: 1, Round: 0,
+
+				ValidatorSet: nfx.Fx.ValSet(),
+			},
+		},
+		RoundSessionChanges: []tmelink.RoundSessionChange{
+			{Height: 1, Round: 0, State: tmelink.RoundSessionStateActive},
+		},
+	}
+	nvuChs[0] <- u
+	nvuChs[1] <- u
 
 	// Join node zero to node one.
 	nw := nfx.Network

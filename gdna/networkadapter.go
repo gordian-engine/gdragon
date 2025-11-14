@@ -287,8 +287,21 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 		s.addStreamAccepter(ctx, accepters, conn)
 	}
 
-	// Now the real main loop.
+	// Block until we get the first network view update.
+	//
+	// We need this in order to handle some edge cases at the initial height.
+	//
+	// The engine is supposed to send this synchronously at startup,
+	// so it should be safe to block here.
 	liveSessions := make(sessionSet)
+	select {
+	case <-ctx.Done():
+		return
+	case u := <-updates:
+		s.processNetworkViewUpdate(ctx, liveSessions, u)
+	}
+
+	// Now the real main loop.
 	for {
 		select {
 		case <-ctx.Done():
