@@ -384,8 +384,7 @@ func (s *NetworkAdapter) handleSessionChanges(
 					liveSessions,
 					c.Height,
 					c.Round,
-					u.Voting.ValidatorSet.PubKeys,
-					u.Voting.ValidatorSet.PubKeyHash,
+					u.Voting.ValidatorSet,
 				)
 				continue
 			}
@@ -396,8 +395,7 @@ func (s *NetworkAdapter) handleSessionChanges(
 					liveSessions,
 					c.Height,
 					c.Round,
-					u.Committing.ValidatorSet.PubKeys,
-					u.Committing.ValidatorSet.PubKeyHash,
+					u.Committing.ValidatorSet,
 				)
 				continue
 			}
@@ -424,8 +422,7 @@ func (s *NetworkAdapter) handleActivatedSession(
 	liveSessions sessionSet,
 	h uint64,
 	r uint32,
-	pubKeys []gcrypto.PubKey,
-	pubKeyHash []byte,
+	valSet tmconsensus.ValidatorSet,
 ) {
 	// Active session -- make sure we have an entry in liveSessions.
 	k := hr{H: h, R: r}
@@ -448,7 +445,7 @@ func (s *NetworkAdapter) handleActivatedSession(
 				"r", k.R,
 			),
 			k.H, k.R,
-			pubKeys,
+			valSet.PubKeys,
 			s.sigLen, s.hashLen,
 			s.sigScheme,
 		)
@@ -476,22 +473,26 @@ func (s *NetworkAdapter) handleActivatedSession(
 
 			VoteSession:  voteSess,
 			CentralState: voteState,
+
+			ValidatorSet: valSet,
+
 			VoteRecord:   new(voteRecord),
 			CancelVoting: cancel,
 		}
 
+		sPubKeyHash := string(valSet.PubKeyHash)
 		s.wg.Add(2)
 		go forwardUnaggregatedPrevotes(
 			ctx, &s.wg,
 			k.H, k.R,
-			string(pubKeyHash),
+			sPubKeyHash,
 			s.h,
 			voteState.Prevotes(),
 		)
 		go forwardUnaggregatedPrecommits(
 			ctx, &s.wg,
 			k.H, k.R,
-			string(pubKeyHash),
+			sPubKeyHash,
 			s.h,
 			voteState.Precommits(),
 		)
@@ -568,7 +569,10 @@ func (s *NetworkAdapter) initiateBroadcasts(
 	ss, ok := liveSessions[sKey]
 	if !ok {
 		liveSessions[sKey] = sessions{
-			Headers:    make(map[uint16]cancelableBroadcast),
+			Headers: make(map[uint16]cancelableBroadcast),
+
+			ValidatorSet: votingView.ValidatorSet,
+
 			VoteRecord: new(voteRecord),
 		}
 	}
@@ -881,6 +885,7 @@ func (s *NetworkAdapter) handleIncomingWingspanStream(
 
 	sess, ok := liveSessions[sessKey]
 	if !ok {
+		// The logic for a missing session is slightly more involved.
 		s.handleMissingSessionWingspanStream(ctx, liveSessions, iws)
 		return
 	}
@@ -941,8 +946,7 @@ func (s *NetworkAdapter) handleMissingSessionWingspanStream(
 		ctx,
 		liveSessions,
 		iws.SessionHeight, iws.SessionRound,
-		valSet.PubKeys,
-		valSet.PubKeyHash,
+		valSet,
 	)
 
 	sess, ok := liveSessions[hr{

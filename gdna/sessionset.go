@@ -52,6 +52,11 @@ type sessions struct {
 	// and to access newly received votes.
 	CentralState *gdwsu.CentralState
 
+	// When a sesion is activated (via the engine's NetworkViewUpdate)
+	// we hold on to the validators,
+	// so we can verify the public key hash on incoming votes.
+	ValidatorSet tmconsensus.ValidatorSet
+
 	// Once we've found and recorded our own prevote,
 	// don't do that work again.
 	VoteRecord *voteRecord
