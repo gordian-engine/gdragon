@@ -3,11 +3,10 @@ package gdnatest
 import (
 	"context"
 
-	"github.com/gordian-engine/gordian/gexchange"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 )
 
-// CHBuffer is an implementation of [tmconsensus.ConsensusHandler]
+// CHBuffer is an implementation of [tmconsensus.FineGrainedConsensusHandler]
 // that accumulates values into channels,
 // so that a test can confirm calls into the handler's methods.
 //
@@ -27,29 +26,29 @@ func NewCHBuffer(chanSize int) CHBuffer {
 	}
 }
 
-func (b CHBuffer) HandleProposedHeader(ctx context.Context, ph tmconsensus.ProposedHeader) gexchange.Feedback {
+func (b CHBuffer) HandleProposedHeader(ctx context.Context, ph tmconsensus.ProposedHeader) tmconsensus.HandleProposedHeaderResult {
 	select {
 	case <-ctx.Done():
-		return gexchange.FeedbackIgnored
+		return tmconsensus.HandleProposedHeaderInternalError
 	case b.ProposedHeaders <- ph:
-		return gexchange.FeedbackAccepted
+		return tmconsensus.HandleProposedHeaderAccepted
 	}
 }
 
-func (b CHBuffer) HandlePrevoteProofs(ctx context.Context, p tmconsensus.PrevoteSparseProof) gexchange.Feedback {
+func (b CHBuffer) HandlePrevoteProofs(ctx context.Context, p tmconsensus.PrevoteSparseProof) tmconsensus.HandleVoteProofsResult {
 	select {
 	case <-ctx.Done():
-		return gexchange.FeedbackIgnored
+		return tmconsensus.HandleVoteProofsInternalError
 	case b.PrevoteSparseProofs <- p:
-		return gexchange.FeedbackAccepted
+		return tmconsensus.HandleVoteProofsAccepted
 	}
 }
 
-func (b CHBuffer) HandlePrecommitProofs(ctx context.Context, p tmconsensus.PrecommitSparseProof) gexchange.Feedback {
+func (b CHBuffer) HandlePrecommitProofs(ctx context.Context, p tmconsensus.PrecommitSparseProof) tmconsensus.HandleVoteProofsResult {
 	select {
 	case <-ctx.Done():
-		return gexchange.FeedbackIgnored
+		return tmconsensus.HandleVoteProofsInternalError
 	case b.PrecommitSparseProofs <- p:
-		return gexchange.FeedbackAccepted
+		return tmconsensus.HandleVoteProofsAccepted
 	}
 }

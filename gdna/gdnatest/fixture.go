@@ -350,8 +350,7 @@ func (f *Fixture) StartWithBufferedConsensusHandlers() (
 
 		nvuOut[i] = nvuCh
 
-		f.NetworkAdapters[i].SetConsensusHandler(chBufs[i])
-		f.NetworkAdapters[i].Start(nvuCh)
+		f.NetworkAdapters[i].Start(chBufs[i], nvuCh)
 	}
 
 	return nvuOut, chBufs

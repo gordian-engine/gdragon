@@ -16,7 +16,7 @@ func forwardUnaggregatedPrevotes(
 	height uint64,
 	round uint32,
 	pubKeyHash string,
-	h tmconsensus.ConsensusHandler,
+	h tmconsensus.FineGrainedConsensusHandler,
 	ch <-chan gdwsu.VerifiedVote,
 ) {
 	defer wg.Done()
@@ -57,7 +57,7 @@ func forwardUnaggregatedPrecommits(
 	height uint64,
 	round uint32,
 	pubKeyHash string,
-	h tmconsensus.ConsensusHandler,
+	h tmconsensus.FineGrainedConsensusHandler,
 	ch <-chan gdwsu.VerifiedVote,
 ) {
 	defer wg.Done()

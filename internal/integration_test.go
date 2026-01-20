@@ -49,12 +49,6 @@ func (n *gdNetwork) GetGossipStrategy(ctx context.Context, idx int) tmgossip.Str
 	return n.nfx.NetworkAdapters[idx]
 }
 
-func (n *gdNetwork) SetConsensusHandler(
-	ctx context.Context, idx int, h tmconsensus.ConsensusHandler,
-) {
-	n.nfx.NetworkAdapters[idx].SetConsensusHandler(h)
-}
-
 func (n *gdNetwork) GetBlockDataArrivalChannel(
 	_ context.Context, idx int,
 ) <-chan tmelink.BlockDataArrival {

@@ -48,7 +48,7 @@ type OriginationDetails struct {
 type NetworkAdapter struct {
 	log *slog.Logger
 
-	h tmconsensus.ConsensusHandler
+	h tmconsensus.FineGrainedConsensusHandler
 
 	bc *gdbc.Adapter
 	ws *wingspan.Protocol[
@@ -252,17 +252,12 @@ func NewNetworkAdapter(
 }
 
 // Start implements [github.com/gordian-engine/gordian/tm/tmgossip.Strategy].
-// (This may get extracted to its own type
-func (s *NetworkAdapter) Start(updates <-chan tmelink.NetworkViewUpdate) {
-	s.startCh <- updates
-}
-
-// SetConsensusHandler sets the consensus handler for the adapter.
-// Typically this is the actual [github.com/gordian-engine/gordian/tm/tmengine.Engine] instance.
-//
-// This method must be called before [*NetworkAdapter.Start].
-func (s *NetworkAdapter) SetConsensusHandler(h tmconsensus.ConsensusHandler) {
+func (s *NetworkAdapter) Start(
+	h tmconsensus.FineGrainedConsensusHandler,
+	updates <-chan tmelink.NetworkViewUpdate,
+) {
 	s.h = h
+	s.startCh <- updates
 }
 
 func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn) {
@@ -1006,7 +1001,10 @@ func (s *NetworkAdapter) handleIncomingHeader(
 
 	// First time we've seen this header.
 	// So, it's up to the mirror (the consensus handler, actually) whether we accept it.
-	f := s.h.HandleProposedHeader(ctx, ih.ProposedHeader)
+	// Use a feedback mapper to simplify the switch statement here.
+	f := (tmconsensus.AcceptAllValidFeedbackMapper{
+		Handler: s.h,
+	}).HandleProposedHeader(ctx, ih.ProposedHeader)
 	switch f {
 	case gexchange.FeedbackAccepted:
 		// This is the case we are hoping for.
