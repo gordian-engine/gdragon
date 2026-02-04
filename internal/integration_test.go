@@ -102,6 +102,16 @@ func (n *gdNetwork) GetProposedHeaderInterceptor(
 				return fmt.Errorf("failed to prepare origination: %w", err)
 			}
 
+			if len(ph.Annotations.Driver) > 0 {
+				// We should probably do something with proper wrapping of previous data,
+				// but for the moment we will just require that we fully control the annotations,
+				// in order to maintain focus on larger and more urgent feature work.
+				panic(fmt.Errorf(
+					"BUG: gdragon breathcast requires full control of proposed header annotations; annotations already existed as %q",
+					ph.Annotations.Driver,
+				))
+			}
+
 			ph.Annotations.Driver, err = json.Marshal(po.BroadcastDetails())
 			if err != nil {
 				panic(fmt.Errorf(

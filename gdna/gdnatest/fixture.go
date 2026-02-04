@@ -119,6 +119,8 @@ func NewFixture(t *testing.T, ctx context.Context, stores []BlockDataStore) *Fix
 				ConnectionChanges: connChangeStreams[i],
 				ProtocolID:        BreathcastProtocolID,
 				BroadcastIDLength: gdbc.BroadcastIDLen,
+
+				Timing: breathcast.DefaultProtocolTiming(),
 			},
 		)
 		t.Cleanup(breathcastProtocols[i].Wait)

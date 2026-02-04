@@ -182,14 +182,20 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 	}
 	nvuChs[0] <- u
 
-	// If the origination worked, the proposed header should be available
-	// quickly on the first receiver's consensus handler.
-	gotPH := <-chBufs[1].ProposedHeaders
-	require.Equal(t, ph, gotPH)
+	for i := range 3 {
+		if i == 0 {
+			continue
+		}
 
-	// And it should be ready very quickly on the other nodes too.
-	gotPH = <-chBufs[2].ProposedHeaders
-	require.Equal(t, ph, gotPH)
+		// If the origination worked, the proposed header should be available
+		// quickly on the first receiver's consensus handler.
+		select {
+		case gotPH := <-chBufs[i].ProposedHeaders:
+			require.Equal(t, ph, gotPH)
+		case <-time.After(200 * time.Millisecond):
+			t.Fatalf("timed out waiting for proposed header arrival on node %d", i)
+		}
+	}
 
 	// Block data is ready quickly on both receiving nodes.
 	expBDA := tmelink.BlockDataArrival{
@@ -197,14 +203,14 @@ func TestNetworkAdapter_proposedBlock(t *testing.T) {
 		Round:  0,
 		ID:     dataID,
 	}
-	bda := <-nfx.BlockDataArrivalChs[0]
-	require.Equal(t, expBDA, bda)
-
-	bda = <-nfx.BlockDataArrivalChs[1]
-	require.Equal(t, expBDA, bda)
-
-	bda = <-nfx.BlockDataArrivalChs[2]
-	require.Equal(t, expBDA, bda)
+	for i := range 3 {
+		select {
+		case bda := <-nfx.BlockDataArrivalChs[i]:
+			require.Equal(t, expBDA, bda)
+		case <-time.After(200 * time.Millisecond):
+			t.Fatalf("timed out waiting for block data arrival on node %d", i)
+		}
+	}
 }
 
 func TestNetworkAdapter_bidirectionalVotes(t *testing.T) {

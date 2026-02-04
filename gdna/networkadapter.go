@@ -326,6 +326,16 @@ func (s *NetworkAdapter) mainLoop(ctx context.Context, initialConns []dconn.Conn
 		case iws := <-s.incomingWingspanStreams:
 			s.handleIncomingWingspanStream(ctx, liveSessions, iws)
 		}
+
+		// While in the prior select,
+		// it is possible that multiple events are enqueued and the context is canceled.
+		// If we get bad luck and try to handle another event when a prior was interrupted
+		// (instead of selecting the ctx.Done case), there could be an unexpected panic.
+		// Therefore, after every handled event, do a non-blocking context finished check.
+		// This ensures that we don't handle two events in a row with canceled context.
+		if ctx.Err() != nil {
+			return
+		}
 	}
 }
 
@@ -678,6 +688,12 @@ func (s *NetworkAdapter) processVotes(
 
 	sess, ok := liveSessions[sessKey]
 	if !ok {
+		if ctx.Err() != nil {
+			// A missed entry is semi-expected when the context has been canceled.
+			return
+		}
+
+		// If it was not a context error, then there is a programming bug.
 		panic(fmt.Errorf(
 			"BUG: session %d/%d should have been live but was not found",
 			sessKey.H, sessKey.R,
@@ -962,6 +978,9 @@ func (s *NetworkAdapter) handleMissingSessionWingspanStream(
 	}
 
 	if err := sess.VoteSession.AcceptStream(ctx, iws.Conn, iws.Stream); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		panic(fmt.Errorf(
 			"TODO: handle error when accepting wingspan stream: %w", err,
 		))
