@@ -747,6 +747,10 @@ func (s *NetworkAdapter) processVotes(
 			if err := sess.CentralState.AddLocalPrevote(
 				ctx, uo, []byte(hash), sig,
 			); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+
 				panic(fmt.Errorf(
 					"TODO: handle error when adding local prevote: %w", err,
 				))
@@ -797,6 +801,10 @@ func (s *NetworkAdapter) processVotes(
 			if err := sess.CentralState.AddLocalPrecommit(
 				ctx, uo, []byte(hash), sig,
 			); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+
 				panic(fmt.Errorf(
 					"TODO: handle error when adding local precommit: %w", err,
 				))
