@@ -350,9 +350,10 @@ func (s *NetworkAdapter) addStreamAccepter(
 
 	sa := gdnai.NewStreamAccepter(conn, cancel, &s.sab)
 
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go sa.AcceptStreams(connCtx, &s.wg)
 	go sa.AcceptUniStreams(connCtx, &s.wg)
+	go sa.ReceiveDatagrams(connCtx, &s.wg)
 
 	accepters[conn.Chain.LeafHandle] = sa
 }
@@ -896,6 +897,10 @@ func (s *NetworkAdapter) handleBreathcastDatagram(
 
 	// We have the matching operation.
 	if err := cb.Op.HandlePacket(ctx, d.Datagram); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+
 		panic(fmt.Errorf(
 			"TODO: handle error in handling packet: %w", err,
 		))
@@ -1019,6 +1024,11 @@ func (s *NetworkAdapter) handleIncomingHeader(
 		// It was a race.
 		// We can just pass the stream directly to the operation.
 		if err := cb.Op.AcceptBroadcast(ctx, ih.Conn, ih.Stream); err != nil {
+			if errors.Is(err, context.Canceled) {
+				// Shutting down, so just quit.
+				return
+			}
+
 			panic(fmt.Errorf(
 				"TODO: handle error when accepting broadcast: %w", err,
 			))
