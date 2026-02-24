@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/gordian-engine/dragon/breathcast"
 	"github.com/gordian-engine/dragon/breathcast/bcmerkle/bcsha256"
 	"github.com/gordian-engine/dragon/dcert/dcerttest"
@@ -26,6 +29,14 @@ import (
 	"github.com/gordian-engine/gordian/tm/tmconsensus/tmconsensustest"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/exporters/autoexport"
+	oattribute "go.opentelemetry.io/otel/attribute"
+	ocodes "go.opentelemetry.io/otel/codes"
+	oresource "go.opentelemetry.io/otel/sdk/resource"
+	otrace "go.opentelemetry.io/otel/sdk/trace"
+	otracetest "go.opentelemetry.io/otel/sdk/trace/tracetest"
+	osemconv "go.opentelemetry.io/otel/semconv/v1.39.0"
+	otrace2 "go.opentelemetry.io/otel/trace"
 )
 
 // Arbitrary protocol IDs; fixed values for tests.
@@ -90,6 +101,29 @@ type Fixture struct {
 	MarshalCodec tmcodec.MarshalCodec
 }
 
+// getAutoExporter returns an auto exporter if any OTEL environment variable is set,
+// otherwise it returns a no-op exporter.
+//
+// The default behavior of the auto exporter does attempt to export
+// in the absence of environment variables,
+// which will fail at
+func getAutoExporter(ctx context.Context) (otrace.SpanExporter, error) {
+	envVars := []string{
+		"OTEL_TRACES_EXPORTER",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	}
+	for _, v := range envVars {
+		if os.Getenv(v) != "" {
+			return autoexport.NewSpanExporter(ctx)
+		}
+	}
+
+	return otracetest.NewNoopExporter(), nil
+}
+
 // NewFixture returns a new Fixture.
 func NewFixture(t *testing.T, ctx context.Context, stores []BlockDataStore) *Fixture {
 	nNodes := len(stores)
@@ -110,11 +144,55 @@ func NewFixture(t *testing.T, ctx context.Context, stores []BlockDataStore) *Fix
 		t.Cleanup(func() { <-done })
 	}
 
+	traceExporter, err := getAutoExporter(ctx)
+	require.NoError(t, err)
+	runID := uuid.New()
+	tracerProviders := make([]*otrace.TracerProvider, nNodes)
+	for i := range tracerProviders {
+		tp := otrace.NewTracerProvider(
+			otrace.WithResource(
+				oresource.NewWithAttributes(
+					"", // No schema, at this point in time.
+					oattribute.String("test.uuid", runID.String()),
+					oattribute.String("test.name", t.Name()),
+					oattribute.Int("node.index", i),
+
+					osemconv.ServiceName("gdragon-fixture"),
+				),
+			),
+			otrace.WithSpanProcessor(
+				otrace.NewBatchSpanProcessor(traceExporter),
+			),
+		)
+		t.Cleanup(func() {
+			// Need a fresh context for this cleanup.
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), time.Second)
+			defer flushCancel()
+			if err := tp.ForceFlush(flushCtx); err != nil {
+				panic(err)
+			}
+		})
+
+		tracerProviders[i] = tp
+	}
+
 	// That allows us to make a raw breathcast protocol.
 	breathcastProtocols := make([]*breathcast.Protocol, nNodes)
 	for i := range breathcastProtocols {
+		ctx, span := tracerProviders[i].Tracer("gdna/gdnatest/fixture").Start(
+			ctx, "breathcast/protocol", otrace2.WithNewRoot(),
+		)
+		t.Cleanup(func() {
+			if t.Failed() {
+				span.SetStatus(ocodes.Error, "test failed")
+			}
+			span.End()
+		})
+
 		breathcastProtocols[i] = breathcast.NewProtocol(
 			ctx, nw.Log.With("breathcastprotocol", i), breathcast.ProtocolConfig{
+				TracerProvider: tracerProviders[i],
+
 				// No initial connections.
 				ConnectionChanges: connChangeStreams[i],
 				ProtocolID:        BreathcastProtocolID,
@@ -149,16 +227,30 @@ func NewFixture(t *testing.T, ctx context.Context, stores []BlockDataStore) *Fix
 		gdwsu.ReceivedFromPeer, gdwsu.UpdateFromCentral,
 	], nNodes)
 	for i := range wingspanProtocols {
+		ctx, span := tracerProviders[i].Tracer("gdna/gdnatest/fixture").Start(
+			ctx, "wingspan/protocol", otrace2.WithNewRoot(),
+		)
+		t.Cleanup(func() {
+			if t.Failed() {
+				span.SetStatus(ocodes.Error, "test failed")
+			}
+			span.End()
+		})
+
 		wingspanProtocols[i] = wingspan.NewProtocol[
 			gdwsu.ParsedPacket, gdwsu.OutboundPacket,
 			gdwsu.ReceivedFromPeer, gdwsu.UpdateFromCentral,
 		](
 			ctx, nw.Log.With("wingspanprotocol", i),
 			wingspan.ProtocolConfig{
+				TracerProvider: tracerProviders[i],
+
 				// No initial connections.
 				ConnectionChanges: connChangeStreams[i],
 				ProtocolID:        WingspanProtocolID,
 				SessionIDLength:   12, // TODO: what constant should this be referencing?
+
+				Timing: wingspan.DefaultProtocolTiming(),
 			},
 		)
 		t.Cleanup(wingspanProtocols[i].Wait)
