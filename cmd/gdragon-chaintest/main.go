@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,8 +10,9 @@ import (
 	"os/signal"
 
 	petname "github.com/dustinkirkland/golang-petname"
-	"github.com/spf13/cobra"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal"
+	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/dataless"
+	"github.com/spf13/cobra"
 )
 
 func main() {
@@ -49,6 +51,7 @@ and the tooling ensures all the described participants are started as independen
 
 	rootCmd.AddCommand(
 		newCoordCmd(log),
+		newValCmd(log),
 	)
 
 	return rootCmd
@@ -91,5 +94,57 @@ func newCoordCmd(log *slog.Logger) *cobra.Command {
 		},
 	}
 
+	return cmd
+}
+
+func newValCmd(log *slog.Logger) *cobra.Command {
+	valCmd := &cobra.Command{
+		Use: "val",
+	}
+
+	valCmd.AddCommand(
+		newValDatalessCmd(log),
+	)
+
+	return valCmd
+}
+
+func newValDatalessCmd(log *slog.Logger) *cobra.Command {
+	cmd := &cobra.Command{
+		Use: "dataless HOME_DIR PATH_TO_SOCKET_FILE",
+
+		Short: "Run a validator for the dataless chain",
+
+		Args: cobra.ExactArgs(2),
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+
+			pubKey, privKey, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				return fmt.Errorf("generating key: %w", err)
+			}
+
+			cc := internal.NewCoordinatorClient(args[1])
+
+			if err := cc.Register(ctx, pubKey); err != nil {
+				return fmt.Errorf("failed to register public key: %w", err)
+			}
+
+			log.Info("Registered public key", "key", fmt.Sprintf("%x", pubKey))
+
+			g, err := cc.AwaitGenesis(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to await genesis: %w", err)
+			}
+
+			if err := dataless.RunValidator(ctx, g.Ed25519PubKeys, privKey); err != nil {
+				return fmt.Errorf("failed to run validator: %w", err)
+			}
+
+			return nil
+		},
+	}
 	return cmd
 }

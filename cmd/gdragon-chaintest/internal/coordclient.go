@@ -30,7 +30,7 @@ func NewCoordinatorClient(socketPath string) *CoordinatorClient {
 }
 
 // Register registers a public key with the coordinator.
-func (c *CoordinatorClient) Register(pubKey ed25519.PublicKey) error {
+func (c *CoordinatorClient) Register(ctx context.Context, pubKey ed25519.PublicKey) error {
 	req := RegisterRequest{Ed25519PubKey: pubKey}
 
 	body, err := json.Marshal(req)
@@ -38,7 +38,13 @@ func (c *CoordinatorClient) Register(pubKey ed25519.PublicKey) error {
 		return fmt.Errorf("marshal register request: %w", err)
 	}
 
-	resp, err := c.client.Post(coordPrefix+"/register", "application/json", bytes.NewReader(body))
+	hReq, err := http.NewRequestWithContext(ctx, http.MethodPost, coordPrefix+"/register", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	hReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(hReq)
 	if err != nil {
 		return fmt.Errorf("post register: %w", err)
 	}
@@ -52,8 +58,13 @@ func (c *CoordinatorClient) Register(pubKey ed25519.PublicKey) error {
 }
 
 // Start requests that the coordinator starts the chain.
-func (c *CoordinatorClient) Start() error {
-	resp, err := c.client.Post(coordPrefix+"/start", "", nil)
+func (c *CoordinatorClient) Start(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coordPrefix+"/start", nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post start: %w", err)
 	}

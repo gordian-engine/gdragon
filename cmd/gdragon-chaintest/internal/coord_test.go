@@ -49,11 +49,11 @@ func TestCoordinator_registerAndGenesis(t *testing.T) {
 
 	pub1, _, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	require.NoError(t, client.Register(pub1))
+	require.NoError(t, client.Register(ctx, pub1))
 
 	pub2, _, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	require.NoError(t, client.Register(pub2))
+	require.NoError(t, client.Register(ctx, pub2))
 
 	genCh := make(chan internal.Genesis, 1)
 
@@ -63,7 +63,7 @@ func TestCoordinator_registerAndGenesis(t *testing.T) {
 		genCh <- g
 	}()
 
-	require.NoError(t, client.Start())
+	require.NoError(t, client.Start(ctx))
 
 	var gen internal.Genesis
 	select {
