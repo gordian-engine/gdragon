@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -30,8 +31,17 @@ func NewCoordinatorClient(socketPath string) *CoordinatorClient {
 }
 
 // Register registers a public key with the coordinator.
-func (c *CoordinatorClient) Register(ctx context.Context, pubKey ed25519.PublicKey) error {
-	req := RegisterRequest{Ed25519PubKey: pubKey}
+func (c *CoordinatorClient) Register(
+	ctx context.Context,
+	pubKey ed25519.PublicKey,
+	listenAddr string,
+	caCert *x509.Certificate,
+) error {
+	req := RegisterRequest{
+		Ed25519PubKey: pubKey,
+		ListenAddr:    listenAddr,
+		CACert:        caCert.Raw,
+	}
 
 	body, err := json.Marshal(req)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gordian-engine/dragon/dcert/dcerttest"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal"
 	"github.com/neilotoole/slogt"
 	"github.com/stretchr/testify/require"
@@ -47,13 +48,17 @@ func TestCoordinator_registerAndGenesis(t *testing.T) {
 
 	client := internal.NewCoordinatorClient(socketPath)
 
+	ca1, err := dcerttest.GenerateCA(dcerttest.FastConfig())
+	require.NoError(t, err)
 	pub1, _, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	require.NoError(t, client.Register(ctx, pub1))
+	require.NoError(t, client.Register(ctx, pub1, "example.com:1111", ca1.Cert))
 
+	ca2, err := dcerttest.GenerateCA(dcerttest.FastConfig())
+	require.NoError(t, err)
 	pub2, _, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	require.NoError(t, client.Register(ctx, pub2))
+	require.NoError(t, client.Register(ctx, pub2, "example.com:2222", ca2.Cert))
 
 	genCh := make(chan internal.Genesis, 1)
 
@@ -73,5 +78,11 @@ func TestCoordinator_registerAndGenesis(t *testing.T) {
 		t.Fatal("timed out awaiting genesis")
 	}
 
-	require.Equal(t, []ed25519.PublicKey{pub1, pub2}, gen.Ed25519PubKeys)
+	require.Len(t, gen.Validators, 2)
+	require.Equal(t, pub1, gen.Validators[0].Ed25519PubKey)
+	require.Equal(t, "example.com:1111", gen.Validators[0].ListenAddr)
+	require.True(t, ca1.Cert.Equal(gen.Validators[0].CACert))
+	require.Equal(t, pub2, gen.Validators[1].Ed25519PubKey)
+	require.Equal(t, "example.com:2222", gen.Validators[1].ListenAddr)
+	require.True(t, ca2.Cert.Equal(gen.Validators[1].CACert))
 }
