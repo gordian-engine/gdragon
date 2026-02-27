@@ -6,7 +6,7 @@ require (
 	github.com/bits-and-blooms/bitset v1.22.0
 	github.com/dustinkirkland/golang-petname v0.0.0-20260215035315-f0c533e9ce9b
 	github.com/google/uuid v1.6.0
-	github.com/gordian-engine/dragon v0.0.0-20260224152653-49c3a5d877a9
+	github.com/gordian-engine/dragon v0.0.0-20260227213149-ee0e7b5e51df
 	github.com/gordian-engine/gordian v0.0.0-20260203153926-7b2d44145a66
 	github.com/neilotoole/slogt v1.1.0
 	github.com/spf13/cobra v1.10.2
