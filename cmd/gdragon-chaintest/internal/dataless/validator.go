@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -215,15 +216,9 @@ func RunValidator(
 			GetOriginationDetailsFunc: func(
 				ph tmconsensus.ProposedHeader,
 			) gdna.OriginationDetails {
-				blockData, ok := bds.GetData(ph.Header.DataID)
-				if !ok {
-					panic(fmt.Errorf(
-						"block data missing for data ID %x", ph.Header.DataID,
-					))
-				}
-
 				po, err := gdbcAdapter.PrepareOrigination(gdbc.PrepareOriginationConfig{
-					BlockData:   blockData,
+					BlockData: []byte(":)"),
+
 					ParityRatio: 0.1,
 					Height:      ph.Header.Height,
 					Round:       ph.Round,
@@ -298,49 +293,75 @@ func RunValidator(
 	initChainCh := make(chan tmdriver.InitChainRequest, 1)
 	finalizeBlockCh := make(chan tmdriver.FinalizeBlockRequest, 1)
 
-	engine, err := tmengine.New(
-		wCtx,
-		log.With("sys", "engine"),
+	var engine *tmengine.Engine
+	eReady := make(chan struct{})
+	go func() {
+		defer close(eReady)
+		e, err := tmengine.New(
+			wCtx,
+			log.With("sys", "engine"),
 
-		tmengine.WithGenesis(&tmconsensus.ExternalGenesis{
-			ChainID:             "dataless",
-			InitialHeight:       1,
-			InitialAppState:     new(bytes.Buffer),
-			GenesisValidatorSet: valSet,
-		}),
+			tmengine.WithGenesis(&tmconsensus.ExternalGenesis{
+				ChainID:             "dataless",
+				InitialHeight:       1,
+				InitialAppState:     new(bytes.Buffer),
+				GenesisValidatorSet: valSet,
+			}),
 
-		tmengine.WithHashScheme(hashScheme),
-		tmengine.WithSignatureScheme(sigScheme),
-		tmengine.WithCommonMessageSignatureProofScheme(gcrypto.SimpleCommonMessageSignatureProofScheme{}),
+			tmengine.WithHashScheme(hashScheme),
+			tmengine.WithSignatureScheme(sigScheme),
+			tmengine.WithCommonMessageSignatureProofScheme(gcrypto.SimpleCommonMessageSignatureProofScheme{}),
 
-		tmengine.WithSigner(tmconsensus.PassthroughSigner{
-			Signer:          signer,
-			SignatureScheme: sigScheme,
-		}),
+			tmengine.WithSigner(tmconsensus.PassthroughSigner{
+				Signer:          signer,
+				SignatureScheme: sigScheme,
+			}),
 
-		tmengine.WithActionStore(tmmemstore.NewActionStore()),
-		tmengine.WithCommittedHeaderStore(tmmemstore.NewCommittedHeaderStore()),
-		tmengine.WithFinalizationStore(tmmemstore.NewFinalizationStore()),
-		tmengine.WithMirrorStore(tmmemstore.NewMirrorStore()),
-		tmengine.WithRoundStore(tmmemstore.NewRoundStore()),
-		tmengine.WithStateMachineStore(tmmemstore.NewStateMachineStore()),
-		tmengine.WithValidatorStore(tmmemstore.NewValidatorStore(hashScheme)),
+			tmengine.WithActionStore(tmmemstore.NewActionStore()),
+			tmengine.WithCommittedHeaderStore(tmmemstore.NewCommittedHeaderStore()),
+			tmengine.WithFinalizationStore(tmmemstore.NewFinalizationStore()),
+			tmengine.WithMirrorStore(tmmemstore.NewMirrorStore()),
+			tmengine.WithRoundStore(tmmemstore.NewRoundStore()),
+			tmengine.WithStateMachineStore(tmmemstore.NewStateMachineStore()),
+			tmengine.WithValidatorStore(tmmemstore.NewValidatorStore(hashScheme)),
 
-		tmengine.WithConsensusStrategy(consensusStrategy),
-		tmengine.WithGossipStrategy(na),
+			tmengine.WithConsensusStrategy(consensusStrategy),
+			tmengine.WithGossipStrategy(na),
 
-		tmengine.WithInitChainChannel(initChainCh),
-		tmengine.WithBlockFinalizationChannel(finalizeBlockCh),
-		tmengine.WithBlockDataArrivalChannel(bdaCh),
+			tmengine.WithInitChainChannel(initChainCh),
+			tmengine.WithBlockFinalizationChannel(finalizeBlockCh),
+			tmengine.WithBlockDataArrivalChannel(bdaCh),
 
-		tmengine.WithTimeoutStrategy(wCtx, tmengine.LinearTimeoutStrategy{}),
+			tmengine.WithTimeoutStrategy(wCtx, tmengine.LinearTimeoutStrategy{}),
 
-		tmengine.WithWatchdog(wd),
-	)
-	if err != nil {
-		return fmt.Errorf("create engine: %w", err)
+			tmengine.WithWatchdog(wd),
+		)
+		if err != nil {
+			panic(fmt.Errorf("create engine: %w", err))
+		}
+		engine = e
+	}()
+
+	var currentVals []tmconsensus.Validator
+	select {
+	case <-wCtx.Done():
+		return fmt.Errorf("interrupted while waiting to initialize chain: %w", err)
+	case req := <-initChainCh:
+		currentVals = req.Genesis.GenesisValidatorSet.Validators
+		appStateHash := sha256.Sum256([]byte("initial"))
+		req.Resp <- tmdriver.InitChainResponse{
+			AppStateHash: appStateHash[:],
+		}
 	}
-	defer engine.Wait()
+
+	select {
+	case <-wCtx.Done():
+		return fmt.Errorf("interrupted while building engine: %w", context.Cause(ctx))
+	case <-eReady:
+		if engine == nil {
+			return errors.New("failed to build engine")
+		}
+	}
 
 	// Everyone dial peer 0.
 	if cfg.UDPConn.LocalAddr().String() != cfg.Peers[0].Addr {
@@ -354,20 +375,10 @@ func RunValidator(
 		}
 	}
 
-	var currentVals []tmconsensus.Validator
-
 	for {
 		select {
 		case <-wCtx.Done():
 			return fmt.Errorf("interrupted: %w", context.Cause(wCtx))
-
-		case req := <-initChainCh:
-			currentVals = req.Genesis.GenesisValidatorSet.Validators
-			appStateHash := sha256.Sum256([]byte("initial"))
-			req.Resp <- tmdriver.InitChainResponse{
-				AppStateHash: appStateHash[:],
-			}
-			initChainCh = nil
 
 		case req := <-finalizeBlockCh:
 			log.Info(
