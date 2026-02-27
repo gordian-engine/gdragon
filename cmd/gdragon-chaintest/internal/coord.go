@@ -147,6 +147,12 @@ func (c *Coordinator) handleRegister(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.WriteHeader(http.StatusNoContent)
+
+	c.log.Info(
+		"Received registration",
+		"pubkey", fmt.Sprintf("%x", req.Ed25519PubKey),
+		"addr", req.ListenAddr,
+	)
 }
 
 func (c *Coordinator) handleStart(w http.ResponseWriter, r *http.Request) {

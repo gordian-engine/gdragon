@@ -124,6 +124,12 @@ func RunValidator(
 					RNG:             rand.New(rand.NewPCG(rand.Uint64(), 0)),
 				},
 			),
+
+			ConnectionChanges: connChangesCh,
+
+			// Normally we would want some control over the shuffle signal,
+			// but for this application we don't care about shuffling connections.
+			ShuffleSignal: make(chan struct{}),
 		},
 	)
 	if err != nil {
