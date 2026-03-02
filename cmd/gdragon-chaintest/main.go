@@ -231,8 +231,7 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 
 				UDPConn: udpConn,
 
-				P2PCert:        leaf.Cert,
-				P2PCertPrivKey: leaf.PrivKey,
+				P2PCert: leaf.TLSCert,
 			}
 
 			if err := dataless.RunValidator(ctx, cfg); err != nil {

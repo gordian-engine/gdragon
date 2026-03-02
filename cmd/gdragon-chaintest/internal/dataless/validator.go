@@ -59,8 +59,7 @@ type ValidatorConfig struct {
 
 	UDPConn *net.UDPConn
 
-	P2PCert        *x509.Certificate
-	P2PCertPrivKey any
+	P2PCert tls.Certificate
 }
 
 func RunValidator(
@@ -93,14 +92,8 @@ func RunValidator(
 
 	cert := cfg.P2PCert
 	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{
-			{
-				Certificate: [][]byte{cert.Raw},
-				PrivateKey:  cfg.P2PCertPrivKey,
-				Leaf:        cert,
-			},
-		},
-		ClientAuth: tls.RequireAndVerifyClientCert,
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
 	}
 
 	connChangesCh := make(chan dconn.Change, 16) // Arbitrarily sized.

@@ -20,6 +20,40 @@ type Validator struct {
 	CACert        *x509.Certificate
 }
 
+// validatorTransport is a JSON-representable form of the [Validator] type.
+// The x509.Certificate does not have a direct JSON representation,
+// so it serializes the raw certificate back and forth.
+type validatorTransport struct {
+	Ed25519PubKey ed25519.PublicKey
+	ListenAddr    string
+	CACert        []byte
+}
+
+func (v Validator) MarshalJSON() ([]byte, error) {
+	return json.Marshal(validatorTransport{
+		Ed25519PubKey: v.Ed25519PubKey,
+		ListenAddr:    v.ListenAddr,
+		CACert:        v.CACert.Raw,
+	})
+}
+
+func (v *Validator) UnmarshalJSON(b []byte) error {
+	var t validatorTransport
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+
+	cert, err := x509.ParseCertificate(t.CACert)
+	if err != nil {
+		return fmt.Errorf("parse CA cert: %w", err)
+	}
+
+	v.Ed25519PubKey = t.Ed25519PubKey
+	v.ListenAddr = t.ListenAddr
+	v.CACert = cert
+	return nil
+}
+
 type RegisterRequest struct {
 	Ed25519PubKey ed25519.PublicKey
 	ListenAddr    string
