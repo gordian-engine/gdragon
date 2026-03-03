@@ -62,6 +62,31 @@ type ValidatorConfig struct {
 	P2PCert tls.Certificate
 }
 
+// proposalBridge is used to store the prepared origination details,
+// created in the ProposedHeaderInterceptor
+// and consumed in the GetOriginationDetailsFunc
+// passed to the network adapter.
+// This is the standard pattern required for dragon,
+// because the gdragon "driver" must prepare the origination details
+// out of band from the consensus-level header data,
+// due to where the proposed header signature is generated.
+type proposalBridge struct {
+	mu sync.Mutex
+	po gdbc.PreparedOrigination
+}
+
+func (b *proposalBridge) Store(po gdbc.PreparedOrigination) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.po = po
+}
+
+func (b *proposalBridge) Load() gdbc.PreparedOrigination {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.po
+}
+
 func RunValidator(
 	ctx context.Context,
 	cfg ValidatorConfig,
@@ -190,6 +215,31 @@ func RunValidator(
 
 	bds := &blockDataMap{data: make(map[string][]byte)}
 
+	bridge := new(proposalBridge)
+	phi := tmelink.ProposedHeaderInterceptorFunc(
+		func(ctx context.Context, ph *tmconsensus.ProposedHeader) error {
+			po, err := gdbcAdapter.PrepareOrigination(gdbc.PrepareOriginationConfig{
+				// Hardcoded to fixed block data for this "dataless" validator.
+				BlockData:   []byte(":)"),
+				ParityRatio: 0.1,
+				Height:      ph.Header.Height,
+				Round:       ph.Round,
+				ProposerIdx: 0, // Hardcoded to the first validator in this app.
+			})
+			if err != nil {
+				return fmt.Errorf("failed to prepare origination: %w", err)
+			}
+
+			ph.Annotations.Driver, err = json.Marshal(po.BroadcastDetails())
+			if err != nil {
+				return fmt.Errorf("marshal broadcast details: %w", err)
+			}
+
+			bridge.Store(po)
+			return nil
+		},
+	)
+
 	na := gdna.NewNetworkAdapter(
 		wCtx,
 		log.With("sys", "networkadapter"),
@@ -209,25 +259,6 @@ func RunValidator(
 			GetOriginationDetailsFunc: func(
 				ph tmconsensus.ProposedHeader,
 			) gdna.OriginationDetails {
-				po, err := gdbcAdapter.PrepareOrigination(gdbc.PrepareOriginationConfig{
-					BlockData: []byte(":)"),
-
-					ParityRatio: 0.1,
-					Height:      ph.Header.Height,
-					Round:       ph.Round,
-					ProposerIdx: 0, // Hardcoded to the first validator in this app.
-				})
-				if err != nil {
-					panic(fmt.Errorf(
-						"failed to prepare origination: %w", err,
-					))
-				}
-
-				ph.Annotations.Driver, err = json.Marshal(po.BroadcastDetails())
-				if err != nil {
-					panic(fmt.Errorf("marshal broadcast details: %w", err))
-				}
-
 				mph, err := codec.MarshalProposedHeader(ph)
 				if err != nil {
 					panic(fmt.Errorf("marshal proposed header: %w", err))
@@ -235,7 +266,7 @@ func RunValidator(
 
 				return gdna.OriginationDetails{
 					AppHeader:           mph,
-					PreparedOrigination: po,
+					PreparedOrigination: bridge.Load(),
 				}
 			},
 
@@ -324,6 +355,8 @@ func RunValidator(
 			tmengine.WithInitChainChannel(initChainCh),
 			tmengine.WithBlockFinalizationChannel(finalizeBlockCh),
 			tmengine.WithBlockDataArrivalChannel(bdaCh),
+
+			tmengine.WithProposedHeaderInterceptor(phi),
 
 			tmengine.WithTimeoutStrategy(wCtx, tmengine.LinearTimeoutStrategy{}),
 
