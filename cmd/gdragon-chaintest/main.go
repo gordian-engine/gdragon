@@ -167,6 +167,17 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 
+			storeMode, err := cmd.Flags().GetString("store")
+			if err != nil {
+				return fmt.Errorf("failed to get store flag: %w", err)
+			}
+			switch storeMode {
+			case "sqlite", "mem":
+				// Okay.
+			default:
+				return fmt.Errorf("illegal store value %q", storeMode)
+			}
+
 			pubKey, privKey, err := ed25519.GenerateKey(nil)
 			if err != nil {
 				return fmt.Errorf("generating key: %w", err)
@@ -222,6 +233,8 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 			cfg := dataless.ValidatorConfig{
 				Log: log,
 
+				StoreMode: storeMode,
+
 				TrustedCAs: cas,
 
 				Peers: peers,
@@ -241,5 +254,8 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().String("store", "mem", "storage backend ('mem' or 'sqlite')")
+
 	return cmd
 }

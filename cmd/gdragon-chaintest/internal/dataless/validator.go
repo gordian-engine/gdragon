@@ -35,6 +35,7 @@ import (
 	"github.com/gordian-engine/gordian/tm/tmengine"
 	"github.com/gordian-engine/gordian/tm/tmengine/tmelink"
 	"github.com/gordian-engine/gordian/tm/tmstore/tmmemstore"
+	"github.com/gordian-engine/tmsqlite"
 )
 
 const (
@@ -49,6 +50,8 @@ type Peer struct {
 
 type ValidatorConfig struct {
 	Log *slog.Logger
+
+	StoreMode string
 
 	TrustedCAs []*x509.Certificate
 
@@ -317,14 +320,25 @@ func RunValidator(
 	initChainCh := make(chan tmdriver.InitChainRequest, 1)
 	finalizeBlockCh := make(chan tmdriver.FinalizeBlockRequest, 1)
 
+	var sqliteStore *tmsqlite.Store
+
+	if cfg.StoreMode == "sqlite" {
+		sqliteStore, err = tmsqlite.NewInMemStore(wCtx, hashScheme, reg)
+		if err != nil {
+			return fmt.Errorf("failed to create SQLite store: %w", err)
+		}
+	} else if cfg.StoreMode == "mem" {
+		// Okay.
+	} else {
+		panic(fmt.Errorf("BUG: attempted to create with store mode %q", cfg.StoreMode))
+	}
+
 	var engine *tmengine.Engine
 	eReady := make(chan struct{})
 	go func() {
 		defer close(eReady)
-		e, err := tmengine.New(
-			wCtx,
-			log.With("sys", "engine"),
 
+		eOpts := []tmengine.Opt{
 			tmengine.WithGenesis(&tmconsensus.ExternalGenesis{
 				ChainID:             "dataless",
 				InitialHeight:       1,
@@ -341,14 +355,6 @@ func RunValidator(
 				SignatureScheme: sigScheme,
 			}),
 
-			tmengine.WithActionStore(tmmemstore.NewActionStore()),
-			tmengine.WithCommittedHeaderStore(tmmemstore.NewCommittedHeaderStore()),
-			tmengine.WithFinalizationStore(tmmemstore.NewFinalizationStore()),
-			tmengine.WithMirrorStore(tmmemstore.NewMirrorStore()),
-			tmengine.WithRoundStore(tmmemstore.NewRoundStore()),
-			tmengine.WithStateMachineStore(tmmemstore.NewStateMachineStore()),
-			tmengine.WithValidatorStore(tmmemstore.NewValidatorStore(hashScheme)),
-
 			tmengine.WithConsensusStrategy(consensusStrategy),
 			tmengine.WithGossipStrategy(na),
 
@@ -361,6 +367,36 @@ func RunValidator(
 			tmengine.WithTimeoutStrategy(wCtx, tmengine.LinearTimeoutStrategy{}),
 
 			tmengine.WithWatchdog(wd),
+		}
+
+		if sqliteStore == nil {
+			eOpts = append(
+				eOpts,
+				tmengine.WithActionStore(tmmemstore.NewActionStore()),
+				tmengine.WithCommittedHeaderStore(tmmemstore.NewCommittedHeaderStore()),
+				tmengine.WithFinalizationStore(tmmemstore.NewFinalizationStore()),
+				tmengine.WithMirrorStore(tmmemstore.NewMirrorStore()),
+				tmengine.WithRoundStore(tmmemstore.NewRoundStore()),
+				tmengine.WithStateMachineStore(tmmemstore.NewStateMachineStore()),
+				tmengine.WithValidatorStore(tmmemstore.NewValidatorStore(hashScheme)),
+			)
+		} else {
+			eOpts = append(
+				eOpts,
+				tmengine.WithActionStore(sqliteStore),
+				tmengine.WithCommittedHeaderStore(sqliteStore),
+				tmengine.WithFinalizationStore(sqliteStore),
+				tmengine.WithMirrorStore(sqliteStore),
+				tmengine.WithRoundStore(sqliteStore),
+				tmengine.WithStateMachineStore(sqliteStore),
+				tmengine.WithValidatorStore(sqliteStore),
+			)
+		}
+
+		e, err := tmengine.New(
+			wCtx,
+			log.With("sys", "engine"),
+			eOpts...,
 		)
 		if err != nil {
 			panic(fmt.Errorf("create engine: %w", err))
