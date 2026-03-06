@@ -15,6 +15,7 @@ import (
 	"github.com/gordian-engine/dragon/dcert/dcerttest"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/dataless"
+	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/validator"
 	"github.com/spf13/cobra"
 )
 
@@ -220,17 +221,17 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 				return fmt.Errorf("failed to await genesis: %w", err)
 			}
 
-			peers := make([]dataless.Peer, 0, len(g.Validators))
+			peers := make([]validator.Peer, 0, len(g.Validators))
 			cas := make([]*x509.Certificate, 0, len(g.Validators))
 			for _, v := range g.Validators {
-				peers = append(peers, dataless.Peer{
+				peers = append(peers, validator.Peer{
 					PubKey: v.Ed25519PubKey,
 					Addr:   v.ListenAddr,
 				})
 				cas = append(cas, v.CACert)
 			}
 
-			cfg := dataless.ValidatorConfig{
+			cfg := validator.Config{
 				Log: log,
 
 				StoreMode: storeMode,

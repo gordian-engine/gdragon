@@ -87,14 +87,23 @@ func (m *BlockDataMap) GetData(id []byte) ([]byte, bool) {
 	return d, ok
 }
 
+// App contains the application-layer concerns
+// necessary for running a validator.
+//
+// Separating this type from the [Config]
+// allows the boilerplate to constructed identically
+// from any CLI, with the specific application
+// only providing a value of this App type.
+type App struct {
+	ConsensusStrategy tmconsensus.ConsensusStrategy
+	BlockDataStore    BlockDataStore
+}
+
 // Config is the configuration for [RunValidator].
 type Config struct {
 	Log *slog.Logger
 
 	StoreMode string
-
-	ConsensusStrategy tmconsensus.ConsensusStrategy
-	BlockDataStore    BlockDataStore
 
 	TrustedCAs []*x509.Certificate
 
@@ -136,6 +145,7 @@ func (b *proposalBridge) Load() gdbc.PreparedOrigination {
 
 func Run(
 	ctx context.Context,
+	app App,
 	cfg Config,
 ) error {
 	log := cfg.Log
@@ -260,14 +270,12 @@ func Run(
 	gcrypto.RegisterEd25519(reg)
 	codec := tmjson.MarshalCodec{CryptoRegistry: reg}
 
-	bds := cfg.BlockDataStore
+	bds := app.BlockDataStore
 
 	bridge := new(proposalBridge)
 	phi := tmelink.ProposedHeaderInterceptorFunc(
 		func(ctx context.Context, ph *tmconsensus.ProposedHeader) error {
 			// Hardcoded to fixed block data for this "dataless" validator.
-			// data := []byte(":)")
-			// bds.PutData(ph.Header.DataID, data)
 			data, ok := bds.GetData(ph.Header.DataID)
 			if !ok {
 				panic(fmt.Errorf(
@@ -418,7 +426,7 @@ func Run(
 				SignatureScheme: sigScheme,
 			}),
 
-			tmengine.WithConsensusStrategy(cfg.ConsensusStrategy),
+			tmengine.WithConsensusStrategy(app.ConsensusStrategy),
 			tmengine.WithGossipStrategy(na),
 
 			tmengine.WithInitChainChannel(initChainCh),
