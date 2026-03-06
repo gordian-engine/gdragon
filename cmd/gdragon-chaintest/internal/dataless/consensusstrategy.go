@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/validator"
 	"github.com/gordian-engine/gordian/tm/tmconsensus"
 )
 
@@ -14,6 +15,8 @@ type ConsensusStrategy struct {
 
 	isSoleProposer bool
 
+	bds validator.BlockDataStore
+
 	mu   sync.Mutex
 	curH uint64
 	curR uint32
@@ -21,10 +24,13 @@ type ConsensusStrategy struct {
 
 func NewConsensusStrategy(
 	log *slog.Logger,
+	bds validator.BlockDataStore,
 	isSoleProposer bool,
 ) *ConsensusStrategy {
 	return &ConsensusStrategy{
 		log: log,
+
+		bds: bds,
 
 		isSoleProposer: isSoleProposer,
 	}
@@ -41,6 +47,10 @@ func (s *ConsensusStrategy) EnterRound(
 	s.mu.Unlock()
 
 	if s.isSoleProposer {
+		// The data ID is always empty
+		// and the data is always the same in this "dataless" application.
+		s.bds.PutData(nil, []byte("fixed"))
+
 		proposalOut <- tmconsensus.Proposal{
 			DataID: "",
 		}
