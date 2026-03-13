@@ -1,4 +1,4 @@
-package dataless
+package fixeddata
 
 import (
 	"context"

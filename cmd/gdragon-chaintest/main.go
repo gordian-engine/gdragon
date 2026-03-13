@@ -14,7 +14,7 @@ import (
 	petname "github.com/dustinkirkland/golang-petname"
 	"github.com/gordian-engine/dragon/dcert/dcerttest"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal"
-	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/dataless"
+	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/fixeddata"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/validator"
 	"github.com/spf13/cobra"
 )
@@ -158,9 +158,9 @@ func newValCmd(log *slog.Logger) *cobra.Command {
 
 func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
-		Use: "dataless VAL_SHARED_HOME_DIR PATH_TO_SOCKET_FILE",
+		Use: "fixeddata VAL_SHARED_HOME_DIR PATH_TO_SOCKET_FILE",
 
-		Short: "Run a validator for the dataless chain",
+		Short: "Run a validator for the fixeddata chain",
 
 		Args: cobra.ExactArgs(2),
 
@@ -248,7 +248,7 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 				P2PCert: leaf.TLSCert,
 			}
 
-			if err := dataless.RunValidator(ctx, cfg); err != nil {
+			if err := fixeddata.RunValidator(ctx, cfg); err != nil {
 				return fmt.Errorf("failed to run validator: %w", err)
 			}
 
