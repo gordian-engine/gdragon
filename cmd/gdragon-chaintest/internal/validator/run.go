@@ -275,7 +275,6 @@ func Run(
 	bridge := new(proposalBridge)
 	phi := tmelink.ProposedHeaderInterceptorFunc(
 		func(ctx context.Context, ph *tmconsensus.ProposedHeader) error {
-			// Hardcoded to fixed block data for this "fixeddata" validator.
 			data, ok := bds.GetData(ph.Header.DataID)
 			if !ok {
 				panic(fmt.Errorf(

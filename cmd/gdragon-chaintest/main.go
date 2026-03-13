@@ -15,6 +15,7 @@ import (
 	"github.com/gordian-engine/dragon/dcert/dcerttest"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/fixeddata"
+	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/randomdata"
 	"github.com/gordian-engine/gdragon/cmd/gdragon-chaintest/internal/validator"
 	"github.com/spf13/cobra"
 )
@@ -150,13 +151,14 @@ func newValCmd(log *slog.Logger) *cobra.Command {
 	}
 
 	valCmd.AddCommand(
-		newValDatalessCmd(log),
+		newValFixedDataCmd(log),
+		newValRandomDataCmd(log),
 	)
 
 	return valCmd
 }
 
-func newValDatalessCmd(log *slog.Logger) *cobra.Command {
+func newValFixedDataCmd(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "fixeddata VAL_SHARED_HOME_DIR PATH_TO_SOCKET_FILE",
 
@@ -168,87 +170,12 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 
-			storeMode, err := cmd.Flags().GetString("store")
+			cfg, err := makeValidatorConfig(ctx, log, cmd, args[0], args[1])
 			if err != nil {
-				return fmt.Errorf("failed to get store flag: %w", err)
-			}
-			switch storeMode {
-			case "sqlite", "mem":
-				// Okay.
-			default:
-				return fmt.Errorf("illegal store value %q", storeMode)
+				return fmt.Errorf("failed to configure validator: %w", err)
 			}
 
-			pubKey, privKey, err := ed25519.GenerateKey(nil)
-			if err != nil {
-				return fmt.Errorf("generating key: %w", err)
-			}
-
-			ca, err := dcerttest.GenerateCA(dcerttest.FastConfig())
-			if err != nil {
-				return fmt.Errorf("generating CA: %w", err)
-			}
-
-			leaf, err := ca.CreateLeafCert(dcerttest.LeafConfig{
-				DNSNames: []string{"localhost"},
-			})
-			if err != nil {
-				return fmt.Errorf("generating leaf certificate: %w", err)
-			}
-
-			udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
-				IP: net.IPv4(127, 0, 0, 1),
-				// Use ephemeral port.
-			})
-			if err != nil {
-				return fmt.Errorf("UDP listener: %w", err)
-			}
-
-			cc := internal.NewCoordinatorClient(args[1])
-
-			if err := cc.Register(ctx, pubKey, udpConn.LocalAddr().String(), ca.Cert); err != nil {
-				return fmt.Errorf("failed to register public key: %w", err)
-			}
-
-			homeDir := filepath.Join(args[0], fmt.Sprintf("%x", pubKey))
-			if err := os.MkdirAll(homeDir, 0700); err != nil {
-				return fmt.Errorf("making validator home directory: %w", err)
-			}
-			log.Info("Registered public key", "key", fmt.Sprintf("%x", pubKey), "home_dir", homeDir)
-
-			g, err := cc.AwaitGenesis(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to await genesis: %w", err)
-			}
-
-			peers := make([]validator.Peer, 0, len(g.Validators))
-			cas := make([]*x509.Certificate, 0, len(g.Validators))
-			for _, v := range g.Validators {
-				peers = append(peers, validator.Peer{
-					PubKey: v.Ed25519PubKey,
-					Addr:   v.ListenAddr,
-				})
-				cas = append(cas, v.CACert)
-			}
-
-			cfg := validator.Config{
-				Log: log,
-
-				StoreMode: storeMode,
-
-				TrustedCAs: cas,
-
-				Peers: peers,
-
-				PubKey:  pubKey,
-				PrivKey: privKey,
-
-				UDPConn: udpConn,
-
-				P2PCert: leaf.TLSCert,
-			}
-
-			if err := fixeddata.RunValidator(ctx, cfg); err != nil {
+			if err := fixeddata.RunValidator(ctx, *cfg); err != nil {
 				return fmt.Errorf("failed to run validator: %w", err)
 			}
 
@@ -259,4 +186,132 @@ func newValDatalessCmd(log *slog.Logger) *cobra.Command {
 	cmd.Flags().String("store", "mem", "storage backend ('mem' or 'sqlite')")
 
 	return cmd
+}
+
+func newValRandomDataCmd(log *slog.Logger) *cobra.Command {
+	cmd := &cobra.Command{
+		Use: "randomdata VAL_SHARED_HOME_DIR PATH_TO_SOCKET_FILE",
+
+		Short: "Run a validator for the randomdata chain",
+
+		Args: cobra.ExactArgs(2),
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+
+			cfg, err := makeValidatorConfig(ctx, log, cmd, args[0], args[1])
+			if err != nil {
+				return fmt.Errorf("failed to configure validator: %w", err)
+			}
+
+			dataSize, err := cmd.Flags().GetInt("datasize")
+			if err != nil {
+				return fmt.Errorf("failed to get datasize flag")
+			}
+
+			if dataSize <= 0 {
+				return fmt.Errorf("datasize flag must be positive (got %d)", dataSize)
+			}
+
+			if err := randomdata.RunValidator(ctx, dataSize, *cfg); err != nil {
+				return fmt.Errorf("failed to run validator: %w", err)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().String("store", "mem", "storage backend ('mem' or 'sqlite')")
+	cmd.Flags().Int("datasize", 16*1024, "size of data to generate for each block")
+
+	return cmd
+}
+
+func makeValidatorConfig(
+	ctx context.Context,
+	log *slog.Logger,
+	cmd *cobra.Command,
+	homeDirRoot string,
+	socketPath string,
+) (*validator.Config, error) {
+	storeMode, err := cmd.Flags().GetString("store")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get store flag: %w", err)
+	}
+	switch storeMode {
+	case "sqlite", "mem":
+		// Okay.
+	default:
+		return nil, fmt.Errorf("illegal store value %q", storeMode)
+	}
+
+	pubKey, privKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, fmt.Errorf("generating key: %w", err)
+	}
+
+	ca, err := dcerttest.GenerateCA(dcerttest.FastConfig())
+	if err != nil {
+		return nil, fmt.Errorf("generating CA: %w", err)
+	}
+
+	leaf, err := ca.CreateLeafCert(dcerttest.LeafConfig{
+		DNSNames: []string{"localhost"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generating leaf certificate: %w", err)
+	}
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
+		IP: net.IPv4(127, 0, 0, 1),
+		// Use ephemeral port.
+	})
+	if err != nil {
+		return nil, fmt.Errorf("UDP listener: %w", err)
+	}
+
+	cc := internal.NewCoordinatorClient(socketPath)
+
+	if err := cc.Register(ctx, pubKey, udpConn.LocalAddr().String(), ca.Cert); err != nil {
+		return nil, fmt.Errorf("failed to register public key: %w", err)
+	}
+
+	homeDir := filepath.Join(homeDirRoot, fmt.Sprintf("%x", pubKey))
+	if err := os.MkdirAll(homeDir, 0700); err != nil {
+		return nil, fmt.Errorf("making validator home directory: %w", err)
+	}
+	log.Info("Registered public key", "key", fmt.Sprintf("%x", pubKey), "home_dir", homeDir)
+
+	g, err := cc.AwaitGenesis(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to await genesis: %w", err)
+	}
+
+	peers := make([]validator.Peer, 0, len(g.Validators))
+	cas := make([]*x509.Certificate, 0, len(g.Validators))
+	for _, v := range g.Validators {
+		peers = append(peers, validator.Peer{
+			PubKey: v.Ed25519PubKey,
+			Addr:   v.ListenAddr,
+		})
+		cas = append(cas, v.CACert)
+	}
+
+	return &validator.Config{
+		Log: log,
+
+		StoreMode: storeMode,
+
+		TrustedCAs: cas,
+
+		Peers: peers,
+
+		PubKey:  pubKey,
+		PrivKey: privKey,
+
+		UDPConn: udpConn,
+
+		P2PCert: leaf.TLSCert,
+	}, nil
 }
