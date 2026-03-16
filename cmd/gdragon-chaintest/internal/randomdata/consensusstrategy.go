@@ -76,6 +76,13 @@ func (s *ConsensusStrategy) EnterRound(
 		proposalOut <- tmconsensus.Proposal{
 			DataID: string(dataID[:]),
 		}
+
+		s.log.Info(
+			"Proposed data",
+			"h", rv.Height,
+			"r", rv.Round,
+			"data_id", fmt.Sprintf("%x", dataID[:]),
+		)
 	}
 
 	return nil
@@ -91,14 +98,23 @@ func (s *ConsensusStrategy) ConsiderProposedBlocks(
 	for _, ph := range phs {
 		d, ok := s.bds.GetData(ph.Header.DataID)
 		if !ok {
-			s.log.Info("Failed to get data for ID", "id", fmt.Sprintf("%x", ph.Header.DataID))
+			s.log.Info(
+				"Failed to get data for ID",
+				"h", ph.Header.Height,
+				"r", ph.Round,
+				"id", fmt.Sprintf("%x", ph.Header.DataID),
+			)
 			continue
 		}
 
 		// The data ID must be the correct hash of the data.
 		calcID := sha256.Sum256(d)
-		if !bytes.Equal(ph.Header.Hash, calcID[:]) {
-			s.log.Info("Hash mismatch for data")
+		if !bytes.Equal(ph.Header.DataID, calcID[:]) {
+			s.log.Info(
+				"Hash mismatch for data",
+				"header_data_id", fmt.Sprintf("%x", ph.Header.DataID),
+				"calculated_data_id", fmt.Sprintf("%x", calcID[:]),
+			)
 			continue
 		}
 
